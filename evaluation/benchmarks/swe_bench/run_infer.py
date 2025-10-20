@@ -74,6 +74,16 @@ BenchMode = Literal['swe', 'swt', 'swt-ci']
 # Global variable to track dataset type
 DATASET_TYPE = 'SWE-bench'
 
+# Path configuration based on runtime type
+# For local runtime, use home directory to avoid permission issues
+IS_LOCAL_RUNTIME = os.environ.get('RUNTIME', 'docker') == 'local'
+if IS_LOCAL_RUNTIME:
+    SWE_UTIL_PATH = os.path.expanduser('~/swe_util')
+    WORKSPACE_BASE = os.path.expanduser('~/workspace')
+else:
+    SWE_UTIL_PATH = '/swe_util'
+    WORKSPACE_BASE = '/workspace'
+
 
 def set_dataset_type(dataset_name: str) -> str:
     """Set dataset type based on dataset name."""
@@ -304,14 +314,14 @@ def initialize_runtime(
     script_dir = os.path.dirname(__file__)
 
     # inject the instance info
-    action = CmdRunAction(command='mkdir -p /swe_util/eval_data/instances')
+    action = CmdRunAction(command=f'mkdir -p {SWE_UTIL_PATH}/eval_data/instances')
     action.set_hard_timeout(600)
     logger.info(action, extra={'msg_type': 'ACTION'})
     obs = runtime.run_action(action)
     logger.info(obs, extra={'msg_type': 'OBSERVATION'})
     assert_and_raise(
         obs.exit_code == 0,
-        f'Failed to create /swe_util/eval_data/instances: {str(obs)}',
+        f'Failed to create {SWE_UTIL_PATH}/eval_data/instances: {str(obs)}',
     )
 
     swe_instance_json_name = 'swe-bench-instance.json'
@@ -326,7 +336,7 @@ def initialize_runtime(
                 json.dump([instance], f)
 
         # Copy the file to the desired location
-        runtime.copy_to(temp_file_path, '/swe_util/eval_data/instances/')
+        runtime.copy_to(temp_file_path, f'{SWE_UTIL_PATH}/eval_data/instances/')
 
         # inject the instance swe entry
         if DATASET_TYPE == 'SWE-bench-Live':
@@ -337,7 +347,7 @@ def initialize_runtime(
             entry_script_path = 'instance_swe_entry.sh'
         runtime.copy_to(
             str(os.path.join(script_dir, f'scripts/setup/{entry_script_path}')),
-            '/swe_util/',
+            f'{SWE_UTIL_PATH}/',
         )
 
     action = CmdRunAction(command='cat ~/.bashrc')
@@ -356,24 +366,24 @@ def initialize_runtime(
         logger.error(f'Failed to source ~/.bashrc: {str(obs)}')
     assert_and_raise(obs.exit_code == 0, f'Failed to source ~/.bashrc: {str(obs)}')
 
-    action = CmdRunAction(command=f'source /swe_util/{entry_script_path}')
+    action = CmdRunAction(command=f'source {SWE_UTIL_PATH}/{entry_script_path}')
     action.set_hard_timeout(600)
     logger.info(action, extra={'msg_type': 'ACTION'})
     obs = runtime.run_action(action)
     logger.info(obs, extra={'msg_type': 'OBSERVATION'})
     assert_and_raise(
         obs.exit_code == 0,
-        f'Failed to source /swe_util/{entry_script_path}: {str(obs)}',
+        f'Failed to source {SWE_UTIL_PATH}/{entry_script_path}: {str(obs)}',
     )
 
-    action = CmdRunAction(command=f'cd /workspace/{workspace_dir_name}')
+    action = CmdRunAction(command=f'cd {WORKSPACE_BASE}/{workspace_dir_name}')
     action.set_hard_timeout(600)
     logger.info(action, extra={'msg_type': 'ACTION'})
     obs = runtime.run_action(action)
     logger.info(obs, extra={'msg_type': 'OBSERVATION'})
     assert_and_raise(
         obs.exit_code == 0,
-        f'Failed to cd to /workspace/{workspace_dir_name}: {str(obs)}',
+        f'Failed to cd to {WORKSPACE_BASE}/{workspace_dir_name}: {str(obs)}',
     )
 
     action = CmdRunAction(command='git reset --hard')
@@ -450,7 +460,7 @@ def complete_runtime(
     obs: CmdOutputObservation
     workspace_dir_name = _get_swebench_workspace_dir_name(instance)
 
-    action = CmdRunAction(command=f'cd /workspace/{workspace_dir_name}')
+    action = CmdRunAction(command=f'cd {WORKSPACE_BASE}/{workspace_dir_name}')
     action.set_hard_timeout(600)
     logger.info(action, extra={'msg_type': 'ACTION'})
     obs = runtime.run_action(action)
@@ -465,7 +475,7 @@ def complete_runtime(
         logger.info(obs, extra={'msg_type': 'OBSERVATION'})
 
         # Then run the command again
-        action = CmdRunAction(command=f'cd /workspace/{workspace_dir_name}')
+        action = CmdRunAction(command=f'cd {WORKSPACE_BASE}/{workspace_dir_name}')
         action.set_hard_timeout(600)
         logger.info(action, extra={'msg_type': 'ACTION'})
         obs = runtime.run_action(action)
@@ -480,7 +490,7 @@ def complete_runtime(
         logger.info(obs, extra={'msg_type': 'OBSERVATION'})
 
         # Then run the command again
-        action = CmdRunAction(command=f'cd /workspace/{workspace_dir_name}')
+        action = CmdRunAction(command=f'cd {WORKSPACE_BASE}/{workspace_dir_name}')
         action.set_hard_timeout(600)
         logger.info(action, extra={'msg_type': 'ACTION'})
         obs = runtime.run_action(action)
@@ -488,7 +498,7 @@ def complete_runtime(
 
     assert_and_raise(
         isinstance(obs, CmdOutputObservation) and obs.exit_code == 0,
-        f'Failed to cd to /workspace/{workspace_dir_name}: {str(obs)}',
+        f'Failed to cd to {WORKSPACE_BASE}/{workspace_dir_name}: {str(obs)}',
     )
 
     action = CmdRunAction(command='git config --global core.pager ""')
