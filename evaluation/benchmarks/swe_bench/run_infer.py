@@ -66,6 +66,8 @@ from openhands.runtime.base import Runtime
 from openhands.utils.async_utils import call_async_from_sync
 from openhands.utils.shutdown_listener import sleep_if_should_continue
 
+# Runtime / feature toggles
+RUNTIME_NAME = os.environ.get('RUNTIME', 'docker').lower()
 USE_HINT_TEXT = os.environ.get('USE_HINT_TEXT', 'false').lower() == 'true'
 RUN_WITH_BROWSING = os.environ.get('RUN_WITH_BROWSING', 'false').lower() == 'true'
 ENABLE_LLM_EDITOR = os.environ.get('ENABLE_LLM_EDITOR', 'false').lower() == 'true'
@@ -76,7 +78,8 @@ DATASET_TYPE = 'SWE-bench'
 
 # Path configuration based on runtime type
 # For local runtime, use home directory to avoid permission issues
-IS_LOCAL_RUNTIME = os.environ.get('RUNTIME', 'docker') == 'local'
+IS_LOCAL_RUNTIME = RUNTIME_NAME == 'local'
+IS_APPTAINER_RUNTIME = RUNTIME_NAME == 'apptainer'
 if IS_LOCAL_RUNTIME:
     SWE_UTIL_PATH = os.path.expanduser('~/swe_util')
     WORKSPACE_BASE = os.path.expanduser('~/workspace')
@@ -178,11 +181,14 @@ def get_instruction(instance: pd.Series, metadata: EvalMetadata) -> MessageActio
     return MessageAction(content=instruction)
 
 
-# TODO: migrate all swe-bench docker to ghcr.io/openhands
-DEFAULT_DOCKER_IMAGE_PREFIX = os.environ.get(
-    'EVAL_DOCKER_IMAGE_PREFIX', 'docker.io/xingyaoww/'
+# TODO: migrate all swe-bench container images to ghcr.io/openhands
+DEFAULT_CONTAINER_IMAGE_PREFIX = os.environ.get(
+    'EVAL_CONTAINER_IMAGE_PREFIX',
+    os.environ.get('EVAL_DOCKER_IMAGE_PREFIX', 'docker.io/xingyaoww/'),
 )
-logger.info(f'Default docker image prefix: {DEFAULT_DOCKER_IMAGE_PREFIX}')
+logger.info(
+    f'Default container image prefix ({RUNTIME_NAME}): {DEFAULT_CONTAINER_IMAGE_PREFIX}'
+)
 
 
 def get_instance_docker_image(
@@ -205,7 +211,7 @@ def get_instance_docker_image(
         return image_name
     else:
         # OpenHands version of the image
-        docker_image_prefix = DEFAULT_DOCKER_IMAGE_PREFIX
+        docker_image_prefix = DEFAULT_CONTAINER_IMAGE_PREFIX
         image_name = 'sweb.eval.x86_64.' + instance_id
         image_name = image_name.replace(
             '__', '_s_'
@@ -244,9 +250,13 @@ def get_config(
     config = get_openhands_config_for_eval(
         metadata=metadata,
         enable_browser=RUN_WITH_BROWSING,
-        runtime=os.environ.get('RUNTIME', 'docker'),
+        runtime=RUNTIME_NAME,
         sandbox_config=sandbox_config,
     )
+
+    if IS_APPTAINER_RUNTIME:
+        # Apptainer runtime uses runtime_container_image directly.
+        config.sandbox.runtime_container_image = base_container_image
 
     config.set_llm_config(
         update_llm_config_for_completions_logging(

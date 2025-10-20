@@ -5,6 +5,7 @@ from openhands.runtime.impl.cli.cli_runtime import CLIRuntime
 from openhands.runtime.impl.docker.docker_runtime import (
     DockerRuntime,
 )
+from openhands.runtime.impl.apptainer.apptainer_runtime import ApptainerRuntime
 from openhands.runtime.impl.kubernetes.kubernetes_runtime import KubernetesRuntime
 from openhands.runtime.impl.local.local_runtime import LocalRuntime
 from openhands.runtime.impl.remote.remote_runtime import RemoteRuntime
@@ -18,6 +19,7 @@ _DEFAULT_RUNTIME_CLASSES: dict[str, type[Runtime]] = {
     'local': LocalRuntime,
     'kubernetes': KubernetesRuntime,
     'cli': CLIRuntime,
+    'apptainer': ApptainerRuntime,
 }
 
 # Try to import third-party runtimes if available
@@ -111,6 +113,7 @@ __all__ = [
     'KubernetesRuntime',
     'CLIRuntime',
     'LocalRuntime',
+    'ApptainerRuntime',
     'get_runtime_cls',
 ]
 
