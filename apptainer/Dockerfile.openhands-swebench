@@ -1,0 +1,36 @@
+# syntax=docker/dockerfile:1.4
+ARG INSTANCE_IMAGE=swebench/sweb.eval.x86_64.scikit-learn_1776_scikit-learn-13439:latest
+ARG RUNTIME_IMAGE=ghcr.io/all-hands-ai/runtime:latest
+
+#########################
+#  stage 0: swe-bench base
+#########################
+FROM ${INSTANCE_IMAGE} AS swebench
+
+#########################
+#  stage 1: OpenHands runtime base
+#########################
+FROM ${RUNTIME_IMAGE} AS openhands-runtime
+
+#########################
+#  stage 2: merged runtime
+#########################
+FROM ${INSTANCE_IMAGE}
+
+# Copy OpenHands runtime tree into the SWE-Bench container
+COPY --from=openhands-runtime /openhands /openhands
+
+# Runtime environment configuration
+ENV PATH="/openhands/micromamba/bin:${PATH}" \
+    MAMBA_ROOT_PREFIX="/openhands/micromamba" \
+    OPENHANDS_RUNTIME_ROOT="/openhands" \
+    PYTHONUNBUFFERED=1
+
+# Optional clean-up steps
+RUN rm -rf /root/.cache /openhands/micromamba/pkgs/*
+
+# Use root as working directory; OpenHands action execution server handles workspace paths.
+WORKDIR /
+
+# Default entrypoint executed by Docker runtime
+ENTRYPOINT ["/openhands/micromamba/bin/micromamba","run","-n","openhands","poetry","run","python","-u","-m","openhands.runtime.action_execution_server"]
