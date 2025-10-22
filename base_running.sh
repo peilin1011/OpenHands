@@ -31,4 +31,4 @@ export EVAL_CONTAINER_IMAGE_PREFIX=/anvme/workspace/b273dd14-swe-openhands/.appt
 ./evaluation/benchmarks/swe_bench/scripts/run_infer.sh   llm.eval_gpt5 HEAD CodeActAgent 1 40 1   princeton-nlp/SWE-bench_Lite test
 
 
-git commit -m "add apptainer runtime" --no-verify
+git commit -m "ADD already generate patch" --no-verify

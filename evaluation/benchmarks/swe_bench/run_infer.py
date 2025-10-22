@@ -4,6 +4,7 @@ import json
 import os
 import tempfile
 import time
+import threading
 from typing import Any, Literal
 
 import pandas as pd
@@ -758,6 +759,31 @@ def complete_runtime(
     return {'git_patch': git_patch}
 
 
+def safe_close_runtime(runtime: Runtime, instance_id: str, timeout: float = 60.0) -> None:
+    """Close the runtime without letting a hanging shutdown block evaluation."""
+
+    def _close() -> None:
+        try:
+            runtime.close()
+        except Exception:
+            logger.exception(
+                'Error closing runtime for instance %s', instance_id, stack_info=True
+            )
+
+    logger.info('Closing runtime for instance %s', instance_id)
+    close_thread = threading.Thread(target=_close, name=f'close-runtime-{instance_id}', daemon=True)
+    close_thread.start()
+    close_thread.join(timeout)
+    if close_thread.is_alive():
+        logger.warning(
+            'Timed out (%ss) while closing runtime for instance %s; continuing without waiting for cleanup.',
+            timeout,
+            instance_id,
+        )
+    else:
+        logger.info('Closed runtime for instance %s', instance_id)
+
+
 def process_instance(
     instance: pd.Series,
     metadata: EvalMetadata,
@@ -823,12 +849,9 @@ def process_instance(
             complete_runtime_fn = complete_runtime
         return_val = complete_runtime_fn(runtime, instance)
         git_patch = return_val['git_patch']
-        logger.info(
-            f'Got git diff for instance {instance.instance_id}:\n--------\n{git_patch}\n--------'
-        )
         logger.info(f'Completed git patch extraction for instance {instance.instance_id}.')
     finally:
-        runtime.close()
+        safe_close_runtime(runtime, instance.instance_id)
     # ==========================================
 
     # ======= Attempt to evaluate the agent's edits =======
@@ -837,54 +860,19 @@ def process_instance(
     test_result = {
         'git_patch': git_patch,
     }
-
+    logger.info(f'Git patch is {git_patch}')
     # If you are working on some simpler benchmark that only evaluates the final model output (e.g., in a MessageAction)
     # You can simply get the LAST `MessageAction` from the returned `state.history` and parse it for evaluation.
-    logger.info(f'Processing history for instance {instance.instance_id}.')
-    logger.info(f'Final state for instance {instance.instance_id}: {state}')
+  
     if state is None:
         raise ValueError('State should not be None.')
 
     # NOTE: this is NO LONGER the event stream, but an agent history that includes delegate agent's events
-    logger.info(f'len(state.history)s states for instance {instance.instance_id}.')
-    total_events = len(state.history)
-    logger.info(
-        'History snapshot for instance %s: %d events, first_event=%s, last_event=%s',
-        instance.instance_id,
-        total_events,
-        type(state.history[0]).__name__ if total_events else 'N/A',
-        type(state.history[-1]).__name__ if total_events else 'N/A',
-    )
-    logger.info(
-        'Serializing history for instance %s with %d events',
-        instance.instance_id,
-        total_events,
-    )
-    histories: list[dict[str, Any]] = []
-    for idx, event in enumerate(state.history):
-        histories.append(event_to_dict(event))
-        if idx % 100 == 0:
-            logger.info(
-                'Serialized %d/%d events for instance %s',
-                idx + 1,
-                total_events,
-                instance.instance_id,
-            )
-        if idx % 100 == 0 and hasattr(event, 'action_id'):
-            logger.debug(
-                'Event %d/%d action_id=%s, type=%s',
-                idx + 1,
-                total_events,
-                event.action_id,
-                type(event).__name__,
-            )
-    logger.info(
-        'Finished serializing history for instance %s (%d events)',
-        instance.instance_id,
-        len(histories),
-    )
-    logger.info('Collecting metrics for instance %s', instance.instance_id)
+
+    histories = [event_to_dict(event) for event in state.history]
+   
     metrics = get_metrics(state)
+
     logger.info(
         'Finished collecting metrics for instance %s: %s',
         instance.instance_id,
