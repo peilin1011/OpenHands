@@ -13,6 +13,123 @@ export APPTAINER_CACHEDIR=/anvme/workspace/b273dd14-swe-openhands/.apptainer_cac
 export APPTAINER_TMPDIR=/anvme/workspace/b273dd14-swe-openhands/.apptainer_cache/tmp
 export APPTAINER_RUNTIME_LOG_DIR=/anvme/workspace/b273dd14-swe-openhands/.apptainer_cache/logs
 
+export HF_HOME="/anvme/workspace/b273dd14-swe-openhands/huggingface_cache"
+export CUDA_VISIBLE_DEVICES=0,1,2,3
+export NO_PROXY="localhost,127.0.0.1"
+export no_proxy="localhost,127.0.0.1"
+
+# Apptainer/Singularity 缓存目录设置（避免 home 目录配额问题）
+mkdir -p "$APPTAINER_CACHEDIR" "$APPTAINER_TMPDIR"
+
+model="/anvme/workspace/b273dd14-swe-openhands/huggingface_cache/Qwen3-32B"  # ✅ 使用本地模型路径
+log_dir='logs'
+TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+
+run_id="${1:-unspecified_run}"
+vllm_log="$log_dir/vllm_${TIMESTAMP}_${run_id}.log"  # ✅ 简化日志名
+swe_log_file="$log_dir/swe_${TIMESTAMP}_${run_id}.log"
+
+mkdir -p $log_dir
+
+#########################################################
+# 端口配置
+port=8003  # ✅ 只需要一个端口
+
+echo "Port configuration:"
+echo "  Unified model $model : $port"
+
+# ✅ 只检查一个端口
+if ss -lntu | awk 'NR>1 {print $5}' | sed 's/.*://' | grep -qw "$port"; then
+    echo "Error: Port $port is already in use. Please free the port first." >&2
+    exit 1
+fi
+
+#########################################################
+
+# ✅ 简化的清理函数
+cleanup() { 
+    echo "Script interrupted or exiting. Cleaning up vLLM server..." >&2
+    if [ -n "$vllm_pid" ] && ps -p "$vllm_pid" > /dev/null; then
+        echo "Stopping vLLM server (PID: $vllm_pid)..." >&2
+        kill "$vllm_pid"
+        wait "$vllm_pid" 2>/dev/null 
+    fi
+    echo "vLLM server stopped." >&2
+}
+trap cleanup SIGINT SIGTERM EXIT
+
+#########################################################
+# 启动统一的 vLLM 服务器
+
+echo ""
+echo "🚀 Starting Unified vLLM Server: $model"
+
+vllm serve $model \
+    --tensor-parallel-size 4 \
+    --reasoning-parser qwen3 \
+    --enforce-eager \
+    --gpu-memory-utilization 0.90 \
+    --enable-auto-tool-choice \
+    --tool-call-parser hermes \
+    --rope-scaling '{"factor": 4.0, "original_max_position_embeddings": 32768, "rope_type": "yarn"}' \
+    --enable-prefix-caching \
+    --max-num-seqs 40 \
+    --max-model-len $((128 * 1024 - 8 * 1024)) \
+    --seed 41 \
+    --port $port > $vllm_log 2>&1 &
+
+vllm_pid=$!  # ✅ 使用统一的变量名
+
+echo "vLLM server starting (PID: $vllm_pid, Port: $port)"
+
+# 等待服务器初始化
+timeout_minutes=9
+start_time=$(date +%s)
+timeout_seconds=$((timeout_minutes * 60))
+
+echo "Waiting for vLLM to initialize (timeout: ${timeout_minutes} minutes)..."
+
+while [ $(($(date +%s) - start_time)) -lt $timeout_seconds ]; do
+    if ! ps -p $vllm_pid > /dev/null; then
+        echo "❌ vLLM server process exited with an error"
+        exit 1
+    fi
+    
+    if [ -f "$vllm_log" ] && grep -q "Application startup complete." "$vllm_log"; then
+        echo "✅ vLLM initialized successfully"
+        break
+    fi
+    sleep 2
+done
+
+if [ $(($(date +%s) - start_time)) -ge $timeout_seconds ]; then
+    echo "❌ vLLM initialization timed out"
+    exit 1
+fi
+
+# ✅ 修复：正确的 cat <<EOF 格式
+cat <<EOF
+
+======================================================================
+🎯 vLLM Server is Ready!
+======================================================================
+   Model: $model (Unified server for main + summary tasks)
+   • PID: $vllm_pid
+   • Port: $port
+   • API Base: http://localhost:$port/v1
+   • Log: $vllm_log
+   • Max concurrent sequences: 40
+======================================================================
+
+💡 Starting mini-SWE-agent with workflow condenser...
+🛑 Press Ctrl+C to stop the server
+
+======================================================================
+🚀 mini-SWE-agent: Qwen3-32B (Single Server)
+======================================================================
+
+EOF
+
 MODEL_CONFIG=$1
 COMMIT_HASH=$2
 AGENT=$3
