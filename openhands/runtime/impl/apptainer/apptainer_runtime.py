@@ -264,12 +264,15 @@ class ApptainerRuntime(ActionExecutionClient):
         if sandbox.enable_gpu:
             command.append('--nv')
 
-        command.extend(['--pwd', '/'])
+        # Start inside /openhands/code so poetry finds pyproject.toml.
+        command.extend(['--pwd', '/openhands/code'])
 
         env = os.environ.copy()
         env_updates = {
             'port': str(self._container_port),
             'PYTHONUNBUFFERED': '1',
+            'SU_TO_USER': 'false',
+            'OPENHANDS_DISABLE_BASH_INIT': 'true',
         }
         if self._vscode_port is not None:
             env_updates['VSCODE_PORT'] = str(self._vscode_port)
@@ -284,7 +287,7 @@ class ApptainerRuntime(ActionExecutionClient):
         command.append(self.apptainer_image)
         command.extend(self.get_action_execution_server_startup_command())
 
-        self.log('debug', f'Apptainer exec command: {command}')
+        self.log('info', f'Apptainer exec command: {command}')
         return command, env
 
     def _build_bind_args(self) -> list[str]:

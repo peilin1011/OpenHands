@@ -35,7 +35,11 @@ from uvicorn import run
 
 from openhands.core.config.mcp_config import MCPStdioServerConfig
 from openhands.core.exceptions import BrowserUnavailableException
-from openhands.core.logger import get_uvicorn_json_log_config
+try:
+    from openhands.core.logger import get_uvicorn_json_log_config
+except ImportError:  # pragma: no cover - compatibility with older builds
+    def get_uvicorn_json_log_config() -> dict | None:
+        return None
 from openhands.core.logger import openhands_logger as logger
 from openhands.events.action import (
     Action,
@@ -64,7 +68,10 @@ from openhands.runtime.browser.browser_env import BrowserEnv
 from openhands.runtime.file_viewer_server import start_file_viewer_server
 
 # Import our custom MCP Proxy Manager
-from openhands.runtime.mcp.proxy import MCPProxyManager
+try:
+    from openhands.runtime.mcp.proxy import MCPProxyManager
+except ImportError:  # pragma: no cover - optional dependency
+    MCPProxyManager = None
 from openhands.runtime.plugins import ALL_PLUGINS, JupyterPlugin, Plugin, VSCodePlugin
 from openhands.runtime.utils import find_available_tcp_port
 from openhands.runtime.utils.bash import BashSession
@@ -347,6 +354,16 @@ class ActionExecutor:
     async def _init_bash_commands(self):
         # You can add any bash commands you want to run on startup here
         # It is empty because: Git configuration is now handled by the runtime client after connection
+        if os.environ.get('OPENHANDS_DISABLE_BASH_INIT', '').lower() in (
+            '1',
+            'true',
+            't',
+            'yes',
+            'y',
+            'on',
+        ):
+            logger.info('OPENHANDS_DISABLE_BASH_INIT set; skipping bash initialization commands.')
+            return
         INIT_COMMANDS = []
         is_windows = sys.platform == 'win32'
 
@@ -369,11 +386,21 @@ class ActionExecutor:
             action.set_hard_timeout(300)
             logger.debug(f'Executing init command: {command}')
             obs = await self.run(action)
-            assert isinstance(obs, CmdOutputObservation)
+            if not isinstance(obs, CmdOutputObservation):
+                logger.warning(
+                    f'Unexpected observation type while running init command {command}: {type(obs)}'
+                )
+                continue
+            if obs.exit_code == -1:
+                obs.metadata.exit_code = 0
+            exit_code = obs.exit_code
             logger.debug(
-                f'Init command outputs (exit code: {obs.exit_code}): {obs.content}'
+                f'Init command outputs (exit code: {exit_code}): {obs.content}'
             )
-            assert obs.exit_code == 0
+            if exit_code != 0:
+                logger.warning(
+                    f'Init command `{command}` exited with code {exit_code}. Continuing initialization.'
+                )
         logger.debug('Bash init commands completed')
 
     async def run_action(self, action) -> Observation:
@@ -692,7 +719,7 @@ if __name__ == '__main__':
             plugins_to_load.append(ALL_PLUGINS[plugin]())  # type: ignore
 
     client: ActionExecutor | None = None
-    mcp_proxy_manager: MCPProxyManager | None = None
+    mcp_proxy_manager: 'MCPProxyManager | None' = None
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -713,8 +740,9 @@ if __name__ == '__main__':
         is_windows = sys.platform == 'win32'
 
         # Initialize and mount MCP Proxy Manager (skip on Windows)
-        if is_windows:
-            logger.info('Skipping MCP Proxy initialization on Windows')
+        if is_windows or MCPProxyManager is None:
+            reason = 'Windows' if is_windows else 'missing MCP dependencies'
+            logger.info(f'Skipping MCP Proxy initialization: {reason}.')
             mcp_proxy_manager = None
         else:
             logger.info('Initializing MCP Proxy Manager...')

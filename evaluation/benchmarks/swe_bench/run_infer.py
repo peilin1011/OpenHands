@@ -3,11 +3,12 @@ import copy
 import json
 import os
 import tempfile
+import time
 from typing import Any, Literal
 
 import pandas as pd
 import toml
-from datasets import load_dataset
+from datasets import DatasetDict, load_dataset, load_from_disk
 from jinja2 import Environment, FileSystemLoader
 
 import openhands.agenthub
@@ -83,6 +84,9 @@ IS_APPTAINER_RUNTIME = RUNTIME_NAME == 'apptainer'
 if IS_LOCAL_RUNTIME:
     SWE_UTIL_PATH = os.path.expanduser('~/swe_util')
     WORKSPACE_BASE = os.path.expanduser('~/workspace')
+elif IS_APPTAINER_RUNTIME:
+    SWE_UTIL_PATH = '/swe_util'
+    WORKSPACE_BASE = '/workspace'
 else:
     SWE_UTIL_PATH = '/swe_util'
     WORKSPACE_BASE = '/workspace'
@@ -186,6 +190,12 @@ DEFAULT_CONTAINER_IMAGE_PREFIX = os.environ.get(
     'EVAL_CONTAINER_IMAGE_PREFIX',
     os.environ.get('EVAL_DOCKER_IMAGE_PREFIX', 'docker.io/xingyaoww/'),
 )
+if IS_APPTAINER_RUNTIME and DEFAULT_CONTAINER_IMAGE_PREFIX == 'docker.io/xingyaoww/':
+    cachedir = os.environ.get('APPTAINER_CACHEDIR')
+    if cachedir:
+        candidate = os.path.join(os.path.abspath(cachedir), 'images')
+        if os.path.isdir(candidate):
+            DEFAULT_CONTAINER_IMAGE_PREFIX = candidate
 logger.info(
     f'Default container image prefix ({RUNTIME_NAME}): {DEFAULT_CONTAINER_IMAGE_PREFIX}'
 )
@@ -216,6 +226,12 @@ def get_instance_docker_image(
         image_name = image_name.replace(
             '__', '_s_'
         )  # to comply with docker image naming convention
+        image_path = os.path.join(docker_image_prefix.rstrip('/'), image_name)
+        if IS_APPTAINER_RUNTIME:
+            # Allow pointing directly to .sif files when running with Apptainer
+            sif_path = image_path if image_path.endswith('.sif') else f'{image_path}.sif'
+            if os.path.isfile(sif_path):
+                return sif_path
         return (docker_image_prefix.rstrip('/') + '/' + image_name).lower()
 
 
@@ -225,6 +241,11 @@ def get_config(
 ) -> OpenHandsConfig:
     # We use a different instance image for the each instance of swe-bench eval
     use_swebench_official_image = DATASET_TYPE != 'SWE-Gym'
+    if IS_APPTAINER_RUNTIME:
+        logger.info(
+            'Apptainer runtime detected, falling back to OpenHands container prefix.'
+        )
+        use_swebench_official_image = False
 
     base_container_image = get_instance_docker_image(
         instance['instance_id'],
@@ -238,7 +259,7 @@ def get_config(
 
     sandbox_config = get_default_sandbox_config_for_eval()
     sandbox_config.base_container_image = base_container_image
-    sandbox_config.enable_auto_lint = True
+    sandbox_config.enable_auto_lint = not IS_APPTAINER_RUNTIME
     sandbox_config.use_host_network = False
     # Add platform to the sandbox config to solve issue 4401
     sandbox_config.platform = 'linux/amd64'
@@ -246,6 +267,34 @@ def get_config(
         dataset_name=metadata.dataset,
         instance_id=instance['instance_id'],
     )
+    if IS_APPTAINER_RUNTIME:
+        host_root = os.path.abspath('/anvme/workspace/b273dd14-swe-openhands')
+        workspace_host_path = os.path.join(host_root, 'workspace')
+        swe_util_host_path = os.path.join(host_root, 'swe_util')
+        openhands_host_path = os.path.join(host_root, 'OpenHands', 'openhands')
+        os.makedirs(workspace_host_path, exist_ok=True)
+        os.makedirs(swe_util_host_path, exist_ok=True)
+        os.makedirs(openhands_host_path, exist_ok=True)
+        sandbox_config.volumes = ','.join(
+            [
+                f'{workspace_host_path}:/workspace:rw',
+                f'{swe_util_host_path}:/swe_util:rw',
+                f'{openhands_host_path}:/openhands/code/openhands:ro',
+            ]
+        )
+        proxy_env = {
+            key: value
+            for key in (
+                'http_proxy',
+                'https_proxy',
+                'HTTP_PROXY',
+                'HTTPS_PROXY',
+                'no_proxy',
+                'NO_PROXY',
+            )
+            if (value := os.environ.get(key))
+        }
+        sandbox_config.runtime_startup_env_vars = proxy_env
 
     config = get_openhands_config_for_eval(
         metadata=metadata,
@@ -253,6 +302,10 @@ def get_config(
         runtime=RUNTIME_NAME,
         sandbox_config=sandbox_config,
     )
+    if IS_APPTAINER_RUNTIME:
+        config.workspace_base = workspace_host_path
+        config.workspace_mount_path = workspace_host_path
+        config.workspace_mount_path_in_sandbox = '/workspace'
 
     if IS_APPTAINER_RUNTIME:
         # Apptainer runtime uses runtime_container_image directly.
@@ -282,6 +335,17 @@ def get_config(
     )
     config.set_agent_config(agent_config)
 
+    if IS_APPTAINER_RUNTIME:
+        agent_cls = openhands.agenthub.Agent.get_cls(metadata.agent_class)
+        filtered_plugins = [
+            plugin for plugin in agent_cls.sandbox_plugins if plugin.name != 'jupyter'
+        ]
+        if len(filtered_plugins) != len(agent_cls.sandbox_plugins):
+            logger.info(
+                'Disabling Jupyter plugin for Apptainer runtime to avoid kernel startup failures.'
+            )
+            agent_cls.sandbox_plugins = filtered_plugins
+
     return config
 
 
@@ -301,24 +365,99 @@ def initialize_runtime(
     obs: CmdOutputObservation
 
     # Set instance id and git configuration
-    action = CmdRunAction(
-        command=f"""echo 'export SWE_INSTANCE_ID={instance['instance_id']}' >> ~/.bashrc && echo 'export PIP_CACHE_DIR=~/.cache/pip' >> ~/.bashrc && echo "alias git='git --no-pager'" >> ~/.bashrc && git config --global core.pager "" && git config --global diff.binary false"""
-    )
-    action.set_hard_timeout(600)
-    logger.info(action, extra={'msg_type': 'ACTION'})
-    obs = runtime.run_action(action)
-    logger.info(obs, extra={'msg_type': 'OBSERVATION'})
-    assert_and_raise(
-        obs.exit_code == 0,
-        f'Failed to export SWE_INSTANCE_ID and configure git: {str(obs)}',
-    )
+    if IS_APPTAINER_RUNTIME:
+        def _run_static_bash(cmd: str, timeout: int = 300) -> CmdOutputObservation:
+            action = CmdRunAction(
+                command=f"bash -lc \"set -e; {cmd}\"",
+                blocking=True,
+                is_static=True,
+            )
+            action.set_hard_timeout(timeout)
+            logger.info(action, extra={'msg_type': 'ACTION'})
+            obs_local = runtime.run_action(action)
+            logger.info(obs_local, extra={'msg_type': 'OBSERVATION'})
+            assert_and_raise(
+                isinstance(obs_local, CmdOutputObservation)
+                and obs_local.exit_code == 0,
+                f'Failed to execute `{cmd}`: {str(obs_local)}',
+            )
+            return obs_local
 
-    action = CmdRunAction(command="""export USER=$(whoami); echo USER=${USER} """)
-    action.set_hard_timeout(600)
-    logger.info(action, extra={'msg_type': 'ACTION'})
-    obs = runtime.run_action(action)
-    logger.info(obs, extra={'msg_type': 'OBSERVATION'})
-    assert_and_raise(obs.exit_code == 0, f'Failed to export USER: {str(obs)}')
+        _run_static_bash(
+            f"echo 'export SWE_INSTANCE_ID={instance['instance_id']}' >> ~/.bashrc"
+        )
+        _run_static_bash("echo 'export PIP_CACHE_DIR=~/.cache/pip' >> ~/.bashrc")
+        _run_static_bash("echo \"alias git='git --no-pager'\" >> ~/.bashrc")
+        _run_static_bash(f"echo 'export WORKSPACE_BASE={WORKSPACE_BASE}' >> ~/.bashrc")
+        _run_static_bash(f"echo 'export SWE_UTIL_PATH={SWE_UTIL_PATH}' >> ~/.bashrc")
+        _run_static_bash('git config --global core.pager ""')
+        _run_static_bash('git config --global diff.binary false')
+        obs = _run_static_bash("export USER=$(whoami); echo USER=${USER}", timeout=600)
+
+        def _run_cmd_with_recovery(
+            cmd: CmdRunAction, error_msg: str
+        ) -> CmdOutputObservation:
+            timeout = getattr(cmd, '_hard_timeout', 300)
+            return _run_static_bash(cmd.command, timeout)
+    else:
+        def _interrupt_and_clear_shell() -> None:
+            """Ensure no previous process is holding the shell."""
+            for _ in range(5):
+                runtime.run_action(CmdRunAction(command='C-c', is_input=True))
+                time.sleep(0.5)
+                blank_obs = runtime.run_action(CmdRunAction(command='', is_input=True))
+                logger.info(blank_obs, extra={'msg_type': 'OBSERVATION'})
+                if isinstance(blank_obs, CmdOutputObservation) and blank_obs.exit_code != -1:
+                    return
+                time.sleep(0.5)
+            logger.warning('Shell may still be busy after multiple interrupt attempts.')
+
+        _interrupt_and_clear_shell()
+
+        def _run_cmd_with_recovery(cmd: CmdRunAction, error_msg: str) -> CmdOutputObservation:
+            for attempt in range(5):
+                logger.info(cmd, extra={'msg_type': 'ACTION'})
+                obs_local = runtime.run_action(cmd)
+                logger.info(obs_local, extra={'msg_type': 'OBSERVATION'})
+                if obs_local.exit_code == 0:
+                    return obs_local
+                if obs_local.exit_code == -1:
+                    logger.warning(
+                        f'Command {cmd.command!r} reported previous process still running. Attempting to interrupt and retry... (attempt {attempt + 1})'
+                    )
+                    _interrupt_and_clear_shell()
+                    continue
+                break
+            assert_and_raise(
+                False,
+                f'{error_msg}: {str(obs_local)}',
+            )
+            return obs_local
+
+        env_setup_commands = [
+            f"echo 'export SWE_INSTANCE_ID={instance['instance_id']}' >> ~/.bashrc",
+            "echo 'export PIP_CACHE_DIR=~/.cache/pip' >> ~/.bashrc",
+            "echo \"alias git='git --no-pager'\" >> ~/.bashrc",
+            f"echo 'export WORKSPACE_BASE={WORKSPACE_BASE}' >> ~/.bashrc",
+            f"echo 'export SWE_UTIL_PATH={SWE_UTIL_PATH}' >> ~/.bashrc",
+        ]
+        for cmd_str in env_setup_commands:
+            action = CmdRunAction(command=cmd_str, blocking=True)
+            action.set_hard_timeout(300)
+            _run_cmd_with_recovery(action, f'Failed to execute `{cmd_str}`')
+
+        git_commands = [
+            'git config --global core.pager ""',
+            'git config --global diff.binary false',
+        ]
+        for git_cmd in git_commands:
+            action = CmdRunAction(command=git_cmd, blocking=True)
+            action.set_hard_timeout(300)
+            _run_cmd_with_recovery(action, f'Failed to execute `{git_cmd}`')
+
+        action = CmdRunAction(command="""export USER=$(whoami); echo USER=${USER} """)
+        action.set_hard_timeout(600)
+        obs = _run_cmd_with_recovery(action, 'Failed to export USER')
 
     # inject the init script
     script_dir = os.path.dirname(__file__)
@@ -326,12 +465,8 @@ def initialize_runtime(
     # inject the instance info
     action = CmdRunAction(command=f'mkdir -p {SWE_UTIL_PATH}/eval_data/instances')
     action.set_hard_timeout(600)
-    logger.info(action, extra={'msg_type': 'ACTION'})
-    obs = runtime.run_action(action)
-    logger.info(obs, extra={'msg_type': 'OBSERVATION'})
-    assert_and_raise(
-        obs.exit_code == 0,
-        f'Failed to create {SWE_UTIL_PATH}/eval_data/instances: {str(obs)}',
+    obs = _run_cmd_with_recovery(
+        action, f'Failed to create {SWE_UTIL_PATH}/eval_data/instances'
     )
 
     swe_instance_json_name = 'swe-bench-instance.json'
@@ -691,6 +826,7 @@ def process_instance(
         logger.info(
             f'Got git diff for instance {instance.instance_id}:\n--------\n{git_patch}\n--------'
         )
+        logger.info(f'Completed git patch extraction for instance {instance.instance_id}.')
     finally:
         runtime.close()
     # ==========================================
@@ -704,12 +840,56 @@ def process_instance(
 
     # If you are working on some simpler benchmark that only evaluates the final model output (e.g., in a MessageAction)
     # You can simply get the LAST `MessageAction` from the returned `state.history` and parse it for evaluation.
+    logger.info(f'Processing history for instance {instance.instance_id}.')
+    logger.info(f'Final state for instance {instance.instance_id}: {state}')
     if state is None:
         raise ValueError('State should not be None.')
 
     # NOTE: this is NO LONGER the event stream, but an agent history that includes delegate agent's events
-    histories = [event_to_dict(event) for event in state.history]
+    logger.info(f'len(state.history)s states for instance {instance.instance_id}.')
+    total_events = len(state.history)
+    logger.info(
+        'History snapshot for instance %s: %d events, first_event=%s, last_event=%s',
+        instance.instance_id,
+        total_events,
+        type(state.history[0]).__name__ if total_events else 'N/A',
+        type(state.history[-1]).__name__ if total_events else 'N/A',
+    )
+    logger.info(
+        'Serializing history for instance %s with %d events',
+        instance.instance_id,
+        total_events,
+    )
+    histories: list[dict[str, Any]] = []
+    for idx, event in enumerate(state.history):
+        histories.append(event_to_dict(event))
+        if idx % 100 == 0:
+            logger.info(
+                'Serialized %d/%d events for instance %s',
+                idx + 1,
+                total_events,
+                instance.instance_id,
+            )
+        if idx % 100 == 0 and hasattr(event, 'action_id'):
+            logger.debug(
+                'Event %d/%d action_id=%s, type=%s',
+                idx + 1,
+                total_events,
+                event.action_id,
+                type(event).__name__,
+            )
+    logger.info(
+        'Finished serializing history for instance %s (%d events)',
+        instance.instance_id,
+        len(histories),
+    )
+    logger.info('Collecting metrics for instance %s', instance.instance_id)
     metrics = get_metrics(state)
+    logger.info(
+        'Finished collecting metrics for instance %s: %s',
+        instance.instance_id,
+        list(metrics.keys()),
+    )
 
     # Save the output
     instruction = message_action.content
@@ -788,9 +968,31 @@ if __name__ == '__main__':
 
     args, _ = parser.parse_known_args()
 
-    # NOTE: It is preferable to load datasets from huggingface datasets and perform post-processing
-    # so we don't need to manage file uploading to OpenHands's repo
-    dataset = load_dataset(args.dataset, split=args.split)
+    # NOTE: Prefer using Hugging Face datasets. However, allow loading from a cached
+    # local directory when provided via SWE_DATASET_LOCAL_PATH.
+    local_dataset_path = os.environ.get('SWE_DATASET_LOCAL_PATH')
+    cache_dir = os.environ.get('HF_DATASETS_CACHE')
+
+    if local_dataset_path:
+        logger.info(
+            f'Loading dataset from local path specified by SWE_DATASET_LOCAL_PATH: {local_dataset_path}'
+        )
+        dataset_from_disk = load_from_disk(local_dataset_path)
+        if isinstance(dataset_from_disk, DatasetDict):
+            assert (
+                args.split in dataset_from_disk
+            ), f"Split '{args.split}' not found in dataset saved at {local_dataset_path}"
+            dataset = dataset_from_disk[args.split]
+        else:
+            dataset = dataset_from_disk
+    else:
+        load_kwargs: dict[str, object] = {}
+        if cache_dir:
+            load_kwargs['cache_dir'] = cache_dir
+            logger.info(f'Using Hugging Face cache directory: {cache_dir}')
+        # NOTE: It is preferable to load datasets from huggingface datasets and perform post-processing
+        # so we don't need to manage file uploading to OpenHands's repo
+        dataset = load_dataset(args.dataset, split=args.split, **load_kwargs)
 
     # Set the global dataset type based on dataset name
     set_dataset_type(args.dataset)
@@ -893,7 +1095,7 @@ if __name__ == '__main__':
             timeout_seconds=8
             * 60
             * 60,  # 8 hour PER instance should be more than enough
-            max_retries=5,
+            max_retries=1,
         )
     else:
         critic = AgentFinishedCritic()
@@ -942,7 +1144,7 @@ if __name__ == '__main__':
                 timeout_seconds=8
                 * 60
                 * 60,  # 8 hour PER instance should be more than enough
-                max_retries=5,
+                max_retries=1,
             )
 
             # When eval is done, we update eval_ids to the instances that failed the current attempt

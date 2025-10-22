@@ -271,15 +271,24 @@ class State:
         return None
 
     def to_llm_metadata(self, model_name: str, agent_name: str) -> dict:
+        version = getattr(openhands, '__version__', None)
+        if not version and hasattr(openhands, 'get_version'):
+            try:
+                version = openhands.get_version()
+            except Exception:  # pragma: no cover - defensive fallback
+                version = None
+        if not version:
+            version = 'unknown'
+
         metadata = {
             'session_id': self.session_id,
-            'trace_version': openhands.__version__,
+            'trace_version': version,
             'trace_user_id': self.user_id,
             'tags': [
                 f'model:{model_name}',
                 f'agent:{agent_name}',
                 f'web_host:{os.environ.get("WEB_HOST", "unspecified")}',
-                f'openhands_version:{openhands.__version__}',
+                f'openhands_version:{version}',
             ],
         }
         return metadata

@@ -198,66 +198,123 @@ class BashSession:
         self.username = username
         self._initialized = False
         self.max_memory_mb = max_memory_mb
+        self._closed = False
+        self.window = None
+        self.pane = None
 
     def initialize(self) -> None:
-        self.server = libtmux.Server()
+        # Use a unique tmux socket per runtime to avoid collisions with host tmux servers.
+        self.socket_name = f'openhands-{os.getpid()}-{uuid.uuid4().hex}'
+        self.server = libtmux.Server(socket_name=self.socket_name)
+        try:
+            self.server.cmd('start-server')
+        except Exception:
+            logger.debug('Failed to explicitly start tmux server', exc_info=True)
+
         _shell_command = '/bin/bash'
         if SU_TO_USER and self.username in list(
             filter(None, [RUNTIME_USERNAME, 'root', 'openhands'])
         ):
-            # This starts a non-login (new) shell for the given user
             _shell_command = f'su {self.username} -'
 
-        # FIXME: we will introduce memory limit using sysbox-runc in coming PR
-        # # otherwise, we are running as the CURRENT USER (e.g., when running LocalRuntime)
-        # if self.max_memory_mb is not None:
-        #     window_command = (
-        #         f'prlimit --as={self.max_memory_mb * 1024 * 1024} {_shell_command}'
-        #     )
-        # else:
         window_command = _shell_command
 
         logger.debug(
             f'Initializing bash session in {self.work_dir} with command: {window_command}'
         )
         session_name = f'openhands-{self.username}-{uuid.uuid4()}'
-        self.session = self.server.new_session(
-            session_name=session_name,
-            start_directory=self.work_dir,  # This parameter is supported by libtmux
-            kill_session=True,
-            x=1000,
-            y=1000,
-        )
+        self.session = None
+        try:
+            self.session = self.server.new_session(
+                session_name=session_name,
+                start_directory=self.work_dir,
+                kill_session=True,
+                attach=False,
+                x=1000,
+                y=1000,
+            )
+        except libtmux.exc.TmuxObjectDoesNotExist:
+            # Fallback to manual session creation if libtmux cannot locate the new session.
+            self.server.cmd(
+                'new-session',
+                '-ds',
+                session_name,
+                '-c',
+                self.work_dir,
+            )
+        if self.session is None:
+            for _ in range(20):
+                sessions = self.server.list_sessions()
+                candidate = next(
+                    (
+                        s
+                        for s in sessions
+                        if s.get('session_name') == session_name
+                    ),
+                    sessions[-1] if sessions else None,
+                )
+                if candidate is not None:
+                    self.session = candidate
+                    break
+                time.sleep(0.1)
+        if self.session is None:
+            raise RuntimeError('Failed to create tmux session for BashSession')
 
-        # Set history limit to a large number to avoid losing history
-        # https://unix.stackexchange.com/questions/43414/unlimited-history-in-tmux
-        self.session.set_option('history-limit', str(self.HISTORY_LIMIT), global_=True)
+        try:
+            self.session.set_option(
+                'history-limit', str(self.HISTORY_LIMIT), global_=True
+            )
+        except (TypeError, libtmux.exc.LibTmuxException):
+            # Fall back to raw tmux command for older libtmux versions
+            self.session.cmd(
+                'set-option', '-g', 'history-limit', str(self.HISTORY_LIMIT)
+            )
         self.session.history_limit = self.HISTORY_LIMIT
-        # We need to create a new pane because the initial pane's history limit is (default) 2000
-        _initial_window = self.session.active_window
-        self.window = self.session.new_window(
-            window_name='bash',
-            window_shell=window_command,
-            start_directory=self.work_dir,  # This parameter is supported by libtmux
-        )
-        self.pane = self.window.active_pane
-        logger.debug(f'pane: {self.pane}; history_limit: {self.session.history_limit}')
-        _initial_window.kill()
 
-        # Configure bash to use simple PS1 and disable PS2
+        self.window = None
+        self.pane = None
+        for _ in range(20):
+            try:
+                self.session.refresh()
+            except Exception:
+                logger.debug('Failed to refresh tmux session state', exc_info=True)
+            try:
+                self.window = self.session.attached_window
+            except (libtmux.exc.LibTmuxException, libtmux.exc.TmuxObjectDoesNotExist):
+                windows = self.session.list_windows()
+                if windows:
+                    self.window = windows[0]
+            if self.window is None:
+                time.sleep(0.1)
+                continue
+            try:
+                self.pane = self.window.attached_pane
+            except (libtmux.exc.LibTmuxException, libtmux.exc.TmuxObjectDoesNotExist):
+                panes = getattr(self.window, 'panes', None) or []
+                if panes:
+                    self.pane = panes[0]
+            if self.pane is not None:
+                break
+            time.sleep(0.1)
+        if self.window is None or self.pane is None:
+            raise RuntimeError('Failed to locate tmux window/pane for BashSession')
+        logger.debug(f'pane: {self.pane}; history_limit: {self.session.history_limit}')
+
+        if window_command:
+            self.pane.send_keys(window_command, enter=True)
+            time.sleep(0.1)
+
         self.pane.send_keys(
             f'export PROMPT_COMMAND=\'export PS1="{self.PS1}"\'; export PS2=""'
         )
-        time.sleep(0.1)  # Wait for command to take effect
+        time.sleep(0.1)
         self._clear_screen()
 
-        # Store the last command for interactive input handling
         self.prev_status: BashCommandStatus | None = None
         self.prev_output: str = ''
         self._closed: bool = False
         logger.debug(f'Bash session initialized with work dir: {self.work_dir}')
 
-        # Maintain the current working directory
         self._cwd = os.path.abspath(self.work_dir)
         self._initialized = True
 
@@ -265,22 +322,83 @@ class BashSession:
         """Ensure the session is closed when the object is destroyed."""
         self.close()
 
+    def _refresh_handles(self, retries: int = 20, delay: float = 0.1) -> None:
+        """Refresh tmux window and pane references when tmux loses track of them."""
+        for _ in range(retries):
+            try:
+                self.session.refresh()
+            except Exception:
+                logger.debug('Failed to refresh tmux session state', exc_info=True)
+
+            window = None
+            try:
+                window = self.session.attached_window
+            except (libtmux.exc.LibTmuxException, libtmux.exc.TmuxObjectDoesNotExist):
+                try:
+                    windows = self.session.list_windows()
+                except Exception:
+                    logger.debug('Failed to list tmux windows', exc_info=True)
+                    windows = []
+                if windows:
+                    window = windows[0]
+            if window is None:
+                time.sleep(delay)
+                continue
+
+            pane = None
+            try:
+                pane = window.attached_pane
+            except (libtmux.exc.LibTmuxException, libtmux.exc.TmuxObjectDoesNotExist):
+                panes = getattr(window, 'panes', None) or []
+                if panes:
+                    pane = panes[0]
+            if pane is None:
+                time.sleep(delay)
+                continue
+
+            self.window = window
+            self.pane = pane
+            return
+
+        raise RuntimeError('Failed to refresh tmux window/pane for BashSession')
+
+    def _ensure_pane_ready(self) -> None:
+        """Verify the pane reference remains valid before using it."""
+        try:
+            self.pane.cmd('display-message')
+        except (libtmux.exc.LibTmuxException, libtmux.exc.TmuxObjectDoesNotExist):
+            logger.debug('Pane invalid, attempting to refresh handles', exc_info=True)
+            self._refresh_handles()
+
     def _get_pane_content(self) -> str:
         """Capture the current pane content and update the buffer."""
-        content = '\n'.join(
-            map(
-                # avoid double newlines
-                lambda line: line.rstrip(),
-                self.pane.cmd('capture-pane', '-J', '-pS', '-').stdout,
-            )
-        )
-        return content
+        for attempt in range(2):
+            try:
+                capture = self.pane.cmd('capture-pane', '-J', '-pS', '-').stdout
+                content = '\n'.join(map(lambda line: line.rstrip(), capture))
+                return content
+            except (libtmux.exc.LibTmuxException, libtmux.exc.TmuxObjectDoesNotExist):
+                logger.debug(
+                    'Failed to capture pane content, refreshing handles', exc_info=True
+                )
+                if attempt == 1:
+                    raise
+                self._refresh_handles()
+        raise RuntimeError('Failed to capture tmux pane content')
 
     def close(self) -> None:
         """Clean up the session."""
         if self._closed:
             return
-        self.session.kill()
+        try:
+            self.session.kill()
+        except Exception:
+            logger.debug('Failed to kill tmux session cleanly', exc_info=True)
+        try:
+            if hasattr(self, 'socket_name'):
+                self.server.cmd('kill-server')
+        except Exception:
+            logger.debug('Failed to kill tmux server cleanly', exc_info=True)
         self._closed = True
 
     @property
@@ -295,9 +413,21 @@ class BashSession:
 
     def _clear_screen(self) -> None:
         """Clear the tmux pane screen and history."""
-        self.pane.send_keys('C-l', enter=False)
+        try:
+            self.pane.send_keys('C-l', enter=False)
+        except (libtmux.exc.LibTmuxException, libtmux.exc.TmuxObjectDoesNotExist):
+            logger.debug('Failed to send clear shortcut, refreshing handles', exc_info=True)
+            self._refresh_handles()
+            self.pane.send_keys('C-l', enter=False)
         time.sleep(0.1)
-        self.pane.cmd('clear-history')
+        try:
+            self.pane.cmd('clear-history')
+        except (libtmux.exc.LibTmuxException, libtmux.exc.TmuxObjectDoesNotExist):
+            logger.debug(
+                'Failed to clear pane history, refreshing handles', exc_info=True
+            )
+            self._refresh_handles()
+            self.pane.cmd('clear-history')
 
     def _get_command_output(
         self,
@@ -495,6 +625,12 @@ class BashSession:
         """Execute a command in the bash session."""
         if not self._initialized:
             raise RuntimeError('Bash session is not initialized')
+
+        try:
+            self._ensure_pane_ready()
+        except Exception as exc:
+            logger.exception('Failed to ensure tmux pane is ready before execution')
+            return ErrorObservation(content=str(exc))
 
         # Strip the command of any leading/trailing whitespace
         logger.debug(f'RECEIVED ACTION: {action}')

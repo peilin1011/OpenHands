@@ -216,13 +216,22 @@ class IssueResolver:
         if runtime_container_image is not None and base_container_image is not None:
             raise ValueError('Cannot provide both runtime and base container images.')
 
+        version = getattr(openhands, '__version__', None)
+        if not version and hasattr(openhands, 'get_version'):
+            try:
+                version = openhands.get_version()
+            except Exception:  # pragma: no cover - defensive
+                version = None
+        if not version:
+            version = 'unknown'
+
         if (
             runtime_container_image is None
             and base_container_image is None
             and not is_experimental
         ):
             runtime_container_image = (
-                f'ghcr.io/all-hands-ai/runtime:{openhands.__version__}-nikolaik'
+                f'ghcr.io/all-hands-ai/runtime:{version}-nikolaik'
             )
 
         # Convert container image values to string or None

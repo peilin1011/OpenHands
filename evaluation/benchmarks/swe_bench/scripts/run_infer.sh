@@ -3,6 +3,16 @@ set -eo pipefail
 
 source "evaluation/utils/version_control.sh"
 
+
+export SWE_DATASET_LOCAL_PATH=/anvme/workspace/b273dd14-swe-openhands/OpenHands/datasets_cache/princeton-nlp__SWE-bench_Lite
+# 如果希望完全离线，可再加
+export HF_DATASETS_OFFLINE=1
+
+export RUNTIME=apptainer
+export APPTAINER_CACHEDIR=/anvme/workspace/b273dd14-swe-openhands/.apptainer_cache
+export APPTAINER_TMPDIR=/anvme/workspace/b273dd14-swe-openhands/.apptainer_cache/tmp
+export APPTAINER_RUNTIME_LOG_DIR=/anvme/workspace/b273dd14-swe-openhands/.apptainer_cache/logs
+
 MODEL_CONFIG=$1
 COMMIT_HASH=$2
 AGENT=$3
@@ -144,3 +154,9 @@ for i in $(seq 1 $N_RUNS); do
 done
 
 checkout_original_branch
+if [ -n "$http_proxy" ]; then
+  export APPTAINERENV_http_proxy="$http_proxy"
+fi
+if [ -n "$https_proxy" ]; then
+  export APPTAINERENV_https_proxy="$https_proxy"
+fi
