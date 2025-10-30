@@ -19,6 +19,7 @@ import sys
 from pathlib import Path
 
 import docker
+from docker.errors import APIError, ImageNotFound
 import pandas as pd
 from datasets import load_dataset, load_from_disk
 
@@ -100,6 +101,68 @@ def parse_args():
         help='Comma-separated list of instance IDs to build',
     )
     return parser.parse_args()
+
+
+def cleanup_images_and_cache(
+    docker_client: docker.DockerClient,
+    images_to_remove: list[str],
+) -> None:
+    """
+    Remove specified images and prune build caches to keep the host clean.
+
+    This is run after every docker pull/build so that subsequent pulls fetch
+    fresh layers and we don't accumulate large local caches.
+    """
+    seen: set[str] = set()
+    for image_name in images_to_remove:
+        if not image_name:
+            continue
+        if image_name in seen:
+            continue
+        seen.add(image_name)
+        try:
+            docker_client.images.remove(image=image_name, force=True, noprune=False)
+            logger.info(f'  Removed local image cache: {image_name}')
+        except ImageNotFound:
+            logger.debug(f'  Image not found during cleanup: {image_name}')
+        except APIError as exc:
+            logger.warning(f'  Failed to remove image {image_name}: {exc.explanation}')
+        except Exception as exc:  # pragma: no cover - defensive logging
+            logger.warning(f'  Unexpected error removing image {image_name}: {exc}')
+
+    try:
+        prune_result = docker_client.images.prune(filters={'dangling': True})
+        removed = prune_result.get('ImagesDeleted') or []
+        reclaimed = prune_result.get('SpaceReclaimed')
+        if removed:
+            logger.info(f'  Pruned {len(removed)} dangling image layers')
+        if reclaimed:
+            logger.info(f'  Reclaimed {reclaimed} bytes from dangling layers')
+    except Exception as exc:  # pragma: no cover - depends on Docker version/state
+        logger.debug(f'  Failed to prune dangling images: {exc}')
+
+    try:
+        if hasattr(docker_client, 'api') and hasattr(docker_client.api, 'prune_build'):
+            docker_client.api.prune_build()
+            logger.info('  Pruned Docker build cache')
+    except Exception as exc:  # pragma: no cover - optional feature
+        logger.debug(f'  Failed to prune Docker build cache: {exc}')
+
+    cache_dir = Path(
+        os.environ.get('DOCKER_BUILD_CACHE', Path.home() / '.cache' / 'docker')
+    )
+    if cache_dir.exists():
+        try:
+            size = sum(f.stat().st_size for f in cache_dir.rglob('*') if f.is_file())
+        except Exception:
+            size = None
+        try:
+            shutil.rmtree(cache_dir, ignore_errors=True)
+            logger.info(f'  Removed local Docker cache directory: {cache_dir}')
+            if size is not None:
+                logger.info(f'  Freed approximately {size / (1024 ** 3):.2f} GB')
+        except Exception as exc:
+            logger.debug(f'  Failed to remove cache directory {cache_dir}: {exc}')
 
 
 def generate_image_name(instance_id: str, dockerhub_user: str, dockerhub_repo: str) -> str:
@@ -308,12 +371,14 @@ def main():
         logger.info(f'[{idx}/{len(instances)}] Processing: {instance_id}')
         logger.info('-' * 80)
 
+        cleanup_candidates: list[str] = []
         try:
             # Get base SWE-bench official image
             base_image = get_instance_docker_image(
                 instance_id=instance_id,
                 swebench_official_image=True,
             )
+            cleanup_candidates.append(base_image)
 
             # Generate target image name
             target_image = generate_image_name(
@@ -321,6 +386,7 @@ def main():
                 dockerhub_user=args.dockerhub_user,
                 dockerhub_repo=args.dockerhub_repo,
             )
+            cleanup_candidates.append(target_image)
 
             # Build composite image
             built_image = build_instance_image(
@@ -332,6 +398,7 @@ def main():
                 enable_browser=args.enable_browser,
                 force_rebuild=args.force_rebuild,
             )
+            cleanup_candidates.append(built_image)
 
             # Tag and push to Docker Hub
             push_success = tag_and_push_image(
@@ -358,6 +425,8 @@ def main():
                 'instance_id': instance_id,
                 'error': str(e),
             })
+        finally:
+            cleanup_images_and_cache(docker_client, cleanup_candidates)
 
     # Summary
     logger.info('')
