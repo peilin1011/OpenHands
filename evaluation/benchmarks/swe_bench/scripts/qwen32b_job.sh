@@ -25,7 +25,7 @@ export SWE_DATASET_LOCAL_PATH=/anvme/workspace/b273dd14-swe-openhands/OpenHands/
 # 如果希望完全离线，可再加
 export HF_DATASETS_OFFLINE=1
 
-# export EVAL_CONDENSER=subtask_aware  # 使用配置中的 [condenser.subtask_aware]
+export EVAL_CONDENSER=subtask_aware  # 使用配置中的 [condenser.subtask_aware]
 
 # export EVAL_CONDENSER=summarizer_for_eval
 export RUNTIME=apptainer
@@ -69,12 +69,12 @@ fi
 
 
 # ✅ 简化的清理函数
-cleanup() { 
+cleanup() {
     echo "Script interrupted or exiting. Cleaning up vLLM server..." >&2
     if [ -n "$vllm_pid" ] && ps -p "$vllm_pid" > /dev/null; then
         echo "Stopping vLLM server (PID: $vllm_pid)..." >&2
         kill "$vllm_pid"
-        wait "$vllm_pid" 2>/dev/null 
+        wait "$vllm_pid" 2>/dev/null
     fi
     echo "vLLM server stopped." >&2
 }
@@ -116,7 +116,7 @@ while [ $(($(date +%s) - start_time)) -lt $timeout_seconds ]; do
         echo "❌ vLLM server process exited with an error"
         exit 1
     fi
-    
+
     if [ -f "$vllm_log" ] && grep -q "Application startup complete." "$vllm_log"; then
         echo "✅ vLLM initialized successfully"
         break
@@ -163,6 +163,7 @@ DATASET=${7:-princeton-nlp/SWE-bench_Verified}
 SPLIT=${8:-test}
 N_RUNS=${9:-1}
 MODE=${10:-swe}
+SELECT_FIRST_N=${11:-0}  # 新增参数：选择前 N 个实例（0 表示不限制）
 
 
 if [ -z "$NUM_WORKERS" ]; then
@@ -211,6 +212,14 @@ fi
 export RUN_WITH_BROWSING=$RUN_WITH_BROWSING
 echo "RUN_WITH_BROWSING: $RUN_WITH_BROWSING"
 
+# Export SELECT_FIRST_N as environment variable for run_infer.py to use
+if [ "$SELECT_FIRST_N" -gt 0 ]; then
+  export SELECT_FIRST_N=$SELECT_FIRST_N
+  echo "Will select first $SELECT_FIRST_N instances from the dataset"
+else
+  echo "No instance selection limit (will use all instances or existing filters)"
+fi
+
 get_openhands_version
 
 echo "AGENT: $AGENT"
@@ -223,6 +232,7 @@ echo "NUM_WORKERS: $NUM_WORKERS"
 echo "COMMIT_HASH: $COMMIT_HASH"
 echo "MODE: $MODE"
 echo "EVAL_CONDENSER: $EVAL_CONDENSER"
+echo "SELECT_FIRST_N: $SELECT_FIRST_N"
 
 # Default to NOT use Hint
 if [ -z "$USE_HINT_TEXT" ]; then

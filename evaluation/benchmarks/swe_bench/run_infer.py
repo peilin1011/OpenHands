@@ -928,7 +928,19 @@ def filter_dataset(dataset: pd.DataFrame, filter_column: str) -> pd.DataFrame:
     skip_ids = os.environ.get('SKIP_IDS', '').split(',')
     if len(skip_ids) > 0:
         logger.info(f'Filtering {len(skip_ids)} tasks from "SKIP_IDS"...')
-        return dataset[~dataset[filter_column].isin(skip_ids)]
+        dataset = dataset[~dataset[filter_column].isin(skip_ids)]
+
+    # NEW: Support SELECT_FIRST_N environment variable to select first N instances
+    select_first_n = os.environ.get('SELECT_FIRST_N', '0')
+    try:
+        select_first_n = int(select_first_n)
+        if select_first_n > 0:
+            logger.info(f'Selecting first {select_first_n} instances from dataset...')
+            dataset = dataset.head(select_first_n)
+            logger.info(f'Retained {len(dataset)} tasks after selecting first N')
+    except ValueError:
+        logger.warning(f'Invalid SELECT_FIRST_N value: {select_first_n}, ignoring')
+
     return dataset
 
 
