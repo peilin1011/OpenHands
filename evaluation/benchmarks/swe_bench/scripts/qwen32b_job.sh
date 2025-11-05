@@ -25,8 +25,9 @@ export SWE_DATASET_LOCAL_PATH=/anvme/workspace/b273dd14-swe-openhands/OpenHands/
 # 如果希望完全离线，可再加
 export HF_DATASETS_OFFLINE=1
 
-export EVAL_CONDENSER=subtask_aware  # 使用配置中的 [condenser.subtask_aware]
+export EVAL_SKIP_MAXIMUM_RETRIES_EXCEEDED=true  # 跳过达到重试上限的实例
 
+export EVAL_CONDENSER=subtask_aware  # 使用配置中的 [condenser.subtask_aware]
 # export EVAL_CONDENSER=summarizer_for_eval
 export RUNTIME=apptainer
 export APPTAINER_CACHEDIR=/anvme/workspace/b273dd14-swe-openhands/.apptainer_cache
@@ -55,16 +56,34 @@ mkdir -p $log_dir
 
 
 # 端口配置
-port=8003  # ✅ 只需要一个端口
+# 支持通过环境变量 VLLM_PORT 指定端口，否则自动分配
+if [ -n "$VLLM_PORT" ]; then
+    port=$VLLM_PORT
+    echo "Using port from environment variable: $port"
+else
+    # 基于 SLURM_JOB_ID 生成唯一端口（范围：8000-9000）
+    if [ -n "$SLURM_JOB_ID" ]; then
+        port=$((8000 + ($SLURM_JOB_ID % 1000)))
+        echo "Generated port from SLURM_JOB_ID: $port"
+    else
+        # 本地测试时使用默认端口
+        port=8003
+        echo "Using default port: $port"
+    fi
+
+    # 检查端口是否可用，如果不可用则递增查找
+    while ss -lntu | awk 'NR>1 {print $5}' | sed 's/.*://' | grep -qw "$port"; do
+        echo "Port $port is in use, trying next port..."
+        port=$((port + 1))
+        if [ $port -gt 9000 ]; then
+            echo "Error: No available ports in range 8000-9000" >&2
+            exit 1
+        fi
+    done
+fi
 
 echo "Port configuration:"
 echo "  Unified model $model : $port"
-
-# ✅ 只检查一个端口
-if ss -lntu | awk 'NR>1 {print $5}' | sed 's/.*://' | grep -qw "$port"; then
-    echo "Error: Port $port is already in use. Please free the port first." >&2
-    exit 1
-fi
 
 
 
@@ -263,7 +282,26 @@ fi
 
 function run_eval() {
   local eval_note="${1}"
+
+  # Create a temporary config file with dynamic port
+  TEMP_CONFIG="/tmp/openhands_config_${SLURM_JOB_ID:-$$}_${port}.toml"
+  echo "Creating temporary config with dynamic port: $TEMP_CONFIG"
+
+  # Use awk to replace all base_url ports (works on both Linux and macOS)
+  awk -v new_port="$port" '
+    /^base_url = "http:\/\/localhost:[0-9]+\/v1"/ {
+      print "base_url = \"http://localhost:" new_port "/v1\""
+      next
+    }
+    { print }
+  ' config.toml > "$TEMP_CONFIG"
+
+  echo "Updated config file with port $port:"
+  echo "  [llm.eval_qwen3_32b] base_url -> http://localhost:$port/v1"
+  echo "  [llm.condenser_llm] base_url -> http://localhost:$port/v1"
+
   COMMAND="poetry run python evaluation/benchmarks/swe_bench/run_infer.py \
+    --config-file $TEMP_CONFIG \
     --agent-cls $AGENT \
     --llm-config $MODEL_CONFIG \
     --max-iterations $MAX_ITER \
@@ -282,6 +320,9 @@ function run_eval() {
 
   # Run the command
   eval $COMMAND
+
+  # Clean up temporary config
+  rm -f "$TEMP_CONFIG"
 }
 
 unset SANDBOX_ENV_GITHUB_TOKEN # prevent the agent from using the github token to push

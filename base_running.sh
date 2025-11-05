@@ -32,3 +32,15 @@ export EVAL_CONTAINER_IMAGE_PREFIX=/anvme/workspace/b273dd14-swe-openhands/.appt
 
 
 git commit -m "ADD already generate patch" --no-verify
+
+
+# 任务1：实例 1-10
+sbatch qwen32b_job.sh llm.eval_qwen3_32b HEAD CodeActAgent 500 110 1 \
+    princeton-nlp/SWE-bench_Verified test 1 swe 10
+
+# 任务2：实例 11-20
+export SKIP_IDS="..."  # 前10个实例的ID
+sbatch qwen32b_job.sh ... 20
+
+# 任务3：实例 21-30
+sbatch qwen32b_job.sh ... 30
