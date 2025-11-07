@@ -9,7 +9,8 @@
 #   --dockerhub-repo REPO      Docker Hub repository name (default: openhands-swebench)
 #   --sif-dir DIR              Directory to store .sif files (default: .apptainer_cache/images)
 #   --cache-dir DIR            Apptainer cache directory (default: .apptainer_cache)
-#   --instance-ids IDS         Comma-separated instance IDs to pull (pulls all if not specified)
+#   --instance-ids IDS         Comma-separated instance IDs to pull
+#   --pull-all                 Pull every instance image available in the repo
 #   --parallel N               Number of parallel pulls (default: 1)
 
 set -e
@@ -21,6 +22,7 @@ CACHE_DIR="$(pwd)/.apptainer_cache"
 PARALLEL=1
 INSTANCE_IDS=""
 DOCKERHUB_USER=""
+PULL_ALL=false
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -48,6 +50,10 @@ while [[ $# -gt 0 ]]; do
         --parallel)
             PARALLEL="$2"
             shift 2
+            ;;
+        --pull-all)
+            PULL_ALL=true
+            shift 1
             ;;
         --help)
             grep "^#" "$0" | grep -v "^#!/" | sed 's/^# //'
@@ -123,6 +129,46 @@ export DOCKERHUB_USER DOCKERHUB_REPO SIF_DIR
 if [ -n "$INSTANCE_IDS" ]; then
     # Use provided instance IDs
     IFS=',' read -ra INSTANCES <<< "$INSTANCE_IDS"
+elif [ "$PULL_ALL" = true ]; then
+    echo "Fetching all instance IDs from Docker Hub repo ${DOCKERHUB_USER}/${DOCKERHUB_REPO}..."
+    if ! mapfile -t INSTANCES < <(python3 - "$DOCKERHUB_USER" "$DOCKERHUB_REPO" <<'PY'
+import json
+import sys
+import urllib.error
+import urllib.request
+
+user = sys.argv[1]
+repo = sys.argv[2]
+prefix = 'sweb.eval.x86_64.'
+url = f'https://hub.docker.com/v2/repositories/{user}/{repo}/tags?page_size=100'
+instances = []
+
+while url:
+    try:
+        with urllib.request.urlopen(url) as resp:
+            data = json.load(resp)
+    except urllib.error.URLError as exc:
+        print(f'Error: failed to list tags from {url}: {exc}', file=sys.stderr)
+        sys.exit(1)
+
+    for result in data.get('results', []):
+        name = result.get('name', '')
+        if name.startswith(prefix):
+            suffix = name[len(prefix):]
+            instances.append(suffix.replace('_s_', '__'))
+
+    url = data.get('next')
+
+print('\n'.join(instances))
+PY
+    ); then
+        echo "Error: Unable to fetch instance list from Docker Hub"
+        exit 1
+    fi
+    if [ ${#INSTANCES[@]} -eq 0 ]; then
+        echo "Error: No tags found in Docker Hub repository ${DOCKERHUB_USER}/${DOCKERHUB_REPO}"
+        exit 1
+    fi
 else
     # Try to read from a file (if it exists)
     if [ -f "instance_ids.txt" ]; then
@@ -130,7 +176,7 @@ else
         mapfile -t INSTANCES < instance_ids.txt
     else
         echo "Error: No instance IDs specified."
-        echo "Either use --instance-ids or create instance_ids.txt with one instance ID per line"
+        echo "Either use --instance-ids, use --pull-all, or create instance_ids.txt with one instance ID per line"
         exit 1
     fi
 fi
