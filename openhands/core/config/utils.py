@@ -696,7 +696,7 @@ def get_condenser_config_arg(
 
     # Handle LLM config reference if needed, using get_llm_config_arg
     if (
-        condenser_type in ('llm', 'llm_attention', 'structured')
+        condenser_type in ('llm', 'llm_attention', 'structured', 'subtask_aware')
         and 'llm_config' in condenser_data
         and isinstance(condenser_data['llm_config'], str)
     ):

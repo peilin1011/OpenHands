@@ -33,7 +33,7 @@ class SubtaskAwareCondenser(RollingCondenser):
         self,
         llm: LLM,
         max_size: int = 100,
-        keep_first: int = 4,  # System prompt + instruction
+        keep_first: int = 2,  # System prompt + instruction
         max_event_length: int = 10_000,
         subtask_detection_enabled: bool = True,
     ):

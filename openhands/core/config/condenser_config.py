@@ -155,6 +155,35 @@ class StructuredSummaryCondenserConfig(BaseModel):
     model_config = ConfigDict(extra='forbid')
 
 
+class SubtaskAwareCondenserConfig(BaseModel):
+    """Configuration for SubtaskAwareCondenser."""
+
+    type: Literal['subtask_aware'] = Field(default='subtask_aware')
+    llm_config: LLMConfig = Field(
+        ..., description='Configuration for the LLM used to detect subtasks and summarize.'
+    )
+    max_size: int = Field(
+        default=100,
+        ge=2,
+        description='Maximum number of events before the condenser must summarize.',
+    )
+    keep_first: int = Field(
+        default=2,
+        ge=1,
+        description='Number of head events to always keep (typically system + summary).',
+    )
+    max_event_length: int = Field(
+        default=10_000,
+        ge=1,
+        description='Maximum length of any single event representation passed to the LLM.',
+    )
+    subtask_detection_enabled: bool = Field(
+        default=True, description='Whether to enable LLM-based subtask detection.'
+    )
+
+    model_config = ConfigDict(extra='forbid')
+
+
 class CondenserPipelineConfig(BaseModel):
     """Configuration for the CondenserPipeline."""
 
@@ -188,6 +217,7 @@ CondenserConfig = (
     | AmortizedForgettingCondenserConfig
     | LLMAttentionCondenserConfig
     | StructuredSummaryCondenserConfig
+    | SubtaskAwareCondenserConfig
     | CondenserPipelineConfig
     | ConversationWindowCondenserConfig
 )
@@ -228,7 +258,7 @@ def condenser_config_from_toml_section(
 
         # Handle LLM config reference if needed
         if (
-            condenser_type in ('llm', 'llm_attention')
+            condenser_type in ('llm', 'llm_attention', 'subtask_aware')
             and 'llm_config' in data
             and isinstance(data['llm_config'], str)
         ):
@@ -293,6 +323,7 @@ def create_condenser_config(condenser_type: str, data: dict) -> CondenserConfig:
         'pipeline': CondenserPipelineConfig,
         'conversation_window': ConversationWindowCondenserConfig,
         'browser_output_masking': BrowserOutputCondenserConfig,
+        'subtask_aware': SubtaskAwareCondenserConfig,
     }
 
     if condenser_type not in condenser_classes:
