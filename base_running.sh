@@ -1,5 +1,7 @@
 source ~/.bashrc
 
+module load cuda/12.8.1
+
 # 或者手动添加 Node.js 到 PATH
 export PATH="$HOME/local/nodejs/node-v22.11.0-linux-x64/bin:$PATH"
 
@@ -31,12 +33,13 @@ export EVAL_CONTAINER_IMAGE_PREFIX=/anvme/workspace/b273dd14-swe-openhands/.appt
 ./evaluation/benchmarks/swe_bench/scripts/run_infer.sh   llm.eval_gpt5 HEAD CodeActAgent 1 40 1   princeton-nlp/SWE-bench_Lite test
 
 
-git commit -m "ADD already generate patch" --no-verify
+<<<<<<< Updated upstream
+git commit -m "ADD subtasck condenser" --no-verify
 
 
 # 任务1：实例 1-10
 sbatch qwen32b_job.sh llm.eval_qwen3_32b HEAD CodeActAgent 500 110 1 \
-    princeton-nlp/SWE-bench_Verified test 1 swe 10
+    princeton-nlp/SWE-bench_Verified test 1 swe slices
 
 # 任务2：实例 11-20
 export SKIP_IDS="..."  # 前10个实例的ID
@@ -44,3 +47,11 @@ sbatch qwen32b_job.sh ... 20
 
 # 任务3：实例 21-30
 sbatch qwen32b_job.sh ... 30
+=======
+git commit -m "ADD data set option" --no-verify
+
+
+如果改动暂时不想提交，可以 git stash push -m "tmp" 把它们藏起来，git pull 完成后再 git stash pop。
+
+salloc --gres=gpu:a100:4 -C a100_80 --time=4:00:00
+./run_condenser_sft.sh 4 ./checkpoints

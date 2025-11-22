@@ -249,21 +249,21 @@ def prepare_dataset(
             f'Starting evaluation with skipping first {skip_num} instances ({len(dataset)} instances to run).'
         )
         if eval_n_limit and eval_n_limit > 0:
-            # Use fixed random seed 42 for sampling without replacement
-            dataset = dataset.sample(
-                min(eval_n_limit, len(dataset)), random_state=42, replace=False
-            )
-            logger.info(
-                f'Randomly sampling {eval_n_limit} unique instances with random seed 42.'
-            )
+            sample_size = min(eval_n_limit, len(dataset))
+            if sample_size < len(dataset):
+                # Use fixed random seed 42 for sampling without replacement
+                dataset = dataset.sample(sample_size, random_state=42, replace=False)
+                logger.info(
+                    f'Randomly sampling {sample_size} unique instances with random seed 42.'
+                )
     elif eval_n_limit and eval_n_limit > 0:
-        # Use fixed random seed 42 for sampling without replacement
-        dataset = dataset.sample(
-            min(eval_n_limit, len(dataset)), random_state=42, replace=False
-        )
-        logger.info(
-            f'Randomly sampling {eval_n_limit} unique instances with random seed 42.'
-        )
+        sample_size = min(eval_n_limit, len(dataset))
+        if sample_size < len(dataset):
+            # Use fixed random seed 42 for sampling without replacement
+            dataset = dataset.sample(sample_size, random_state=42, replace=False)
+            logger.info(
+                f'Randomly sampling {sample_size} unique instances with random seed 42.'
+            )
 
     def make_serializable(instance_dict: dict) -> dict:
         import numpy as np

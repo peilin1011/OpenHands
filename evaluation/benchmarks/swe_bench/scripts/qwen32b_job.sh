@@ -8,7 +8,7 @@
 # SLURM 任务配置与环境初始化
 # ============================================================================
 unset SLURM_EXPORT_ENV      # 允许环境传递给srun，提高环境变量传递的灵活性
-module load python/3.12-conda  # 加载 Python 3.12 conda 环境模块
+module load python/3.12-conda  # 加载 Python 3.12 conda 环境模块 (可选，根据系统配置)
 
 # 设置工作目录
 WORKDIR="/anvme/workspace/b273dd14-swe-openhands/OpenHands"
@@ -20,7 +20,7 @@ cd "$WORKDIR"
 # 设置 Conda 环境和包的存储位置，避免占用 home 目录配额
 export CONDA_ENVS_PATH=/anvme/workspace/b273dd14-swe-openhands/conda_envs
 export CONDA_PKGS_DIRS=/anvme/workspace/b273dd14-swe-openhands/conda_pkgs
-conda activate openhands  # 激活 OpenHands 环境
+conda activate openhands  # 激活 OpenHands 环境 (假设已在当前 shell 中激活)
 
 # 设置错误退出模式：任何命令失败都会终止脚本执行
 set -eo pipefail
@@ -31,15 +31,24 @@ source "/anvme/workspace/b273dd14-swe-openhands/OpenHands/evaluation/utils/versi
 # ============================================================================
 # 数据集与 HuggingFace 配置
 # ============================================================================
-# 设置默认的本地数据集路径（SWE-rebench leaderboard-2025-06 子集）
+# 设置默认的本地数据集路径
 # 可通过 SWE_DATASET_LOCAL_PATH 环境变量覆盖此设置
-DEFAULT_SWE_DATASET_LOCAL_PATH="/anvme/workspace/b273dd14-swe-openhands/OpenHands/datasets_cache/nebius__SWE-rebench-leaderboard_2025_06_poetry"
+# 可用选项：
+#   - nebius__SWE-rebench-leaderboard_2025_06_poetry (默认 - leaderboard 2025-06版)
+#   - nebius__SWE-rebench (纯版本，需要自行处理数据格式)
+#   - nebius__SWE-rebench-leaderboard (leaderboard 原始版本)
+#   - princeton-nlp__SWE-bench_Verified (SWE-Bench Verified)
+#DEFAULT_SWE_DATASET_LOCAL_PATH="/anvme/workspace/b273dd14-swe-openhands/OpenHands/datasets_cache/nebius__SWE-rebench-leaderboard_2025_06_poetry"
+
+#DEFAULT_SWE_DATASET_LOCAL_PATH="/anvme/workspace/b273dd14-swe-openhands/OpenHands/datasets_cache/nebius__SWE-rebench-leaderboard_2025_06_poetry"
+DEFAULT_SWE_DATASET_LOCAL_PATH="/anvme/workspace/b273dd14-swe-openhands/OpenHands/datasets_cache/nebius__SWE-rebench-formatted"
 export SWE_DATASET_LOCAL_PATH="${SWE_DATASET_LOCAL_PATH:-$DEFAULT_SWE_DATASET_LOCAL_PATH}"
-# 可选：替代数据集路径（已注释）
+# 替代数据集路径示例（已注释）
+#export SWE_DATASET_LOCAL_PATH=/anvme/workspace/b273dd14-swe-openhands/OpenHands/datasets_cache/nebius__SWE-rebench
 # export SWE_DATASET_LOCAL_PATH=/anvme/workspace/b273dd14-swe-openhands/OpenHands/datasets_cache/princeton-nlp__SWE-bench_Verified
 
 # 启用 HuggingFace 离线模式（避免网络请求），除非显式通过环境变量覆盖
-export HF_DATASETS_OFFLINE="${HF_DATASETS_OFFLINE:-1}"
+export HF_DATASETS_OFFLINE=1
 
 # ============================================================================
 # 评估与条件化器配置
@@ -47,7 +56,7 @@ export HF_DATASETS_OFFLINE="${HF_DATASETS_OFFLINE:-1}"
 export EVAL_SKIP_MAXIMUM_RETRIES_EXCEEDED=true  # 跳过达到重试上限的实例，提高效率
 # 已注释的选项：可使用 subtask_aware 条件化器（需配置文件支持）
 # export EVAL_CONDENSER=subtask_aware
-export EVAL_CONDENSER=summarizer_for_eval  # 使用摘要化的评估条件化器
+# export EVAL_CONDENSER=summarizer_for_eval  # 使用摘要化的评估条件化器
 
 # ============================================================================
 # 容器（Apptainer）配置
@@ -155,20 +164,20 @@ echo "🚀 Starting Unified vLLM Server: $model"
 
 # vLLM 服务器启动命令及配置参数
 vllm serve $model \
-    --tensor-parallel-size 4 \              # 使用 4 块 GPU 进行张量并行处理
-    --reasoning-parser qwen3 \              # 使用 Qwen3 专用的推理解析器
-    --enforce-eager \                       # 强制使用 eager 执行模式（避免编译开销）
-    --gpu-memory-utilization 0.90 \         # GPU 内存使用率 90%（充分利用显存）
-    --enable-auto-tool-choice \             # 启用自动工具选择功能
-    --tool-call-parser hermes \             # 工具调用解析器
-    --rope-scaling '{"factor": 4.0, "original_max_position_embeddings": 32768, "rope_type": "yarn"}' \  # RoPE 位置编码扩展（支持更长的上下文）
-    --enable-prefix-caching \               # 启用前缀缓存，提高重复查询性能
-    --max-num-seqs 40 \                     # 最多同时处理 40 个序列
-    --max-model-len $((128 * 1024 - 8 * 1024)) \  # 最大模型长度：128k - 8k = 120k tokens
-    --seed 41 \                             # 随机种子（保证可重现性）
-    --port $port > $vllm_log 2>&1 &         # 监听指定端口，重定向日志输出
-
-vllm_pid=$!  # 保存 vLLM 进程 ID，用于后续的监控和清理
+    --tensor-parallel-size 4 \
+    --reasoning-parser qwen3 \
+    --enforce-eager \
+    --gpu-memory-utilization 0.90 \
+    --enable-auto-tool-choice \
+    --tool-call-parser hermes \
+    --rope-scaling '{"factor": 4.0, "original_max_position_embeddings": 32768, "rope_type": "yarn"}' \
+    --enable-prefix-caching \
+    --max-num-seqs 40 \
+    --max-model-len $((128 * 1024 - 8 * 1024)) \
+    --seed 41 \
+    --port $port > $vllm_log 2>&1 &
+    
+vllm_pid=$!  # ✅ 使用统一的变量名
 
 echo "vLLM server starting (PID: $vllm_pid, Port: $port)"
 
@@ -233,12 +242,15 @@ AGENT=${3:-CodeActAgent}
 EVAL_LIMIT=${4:-500}
 MAX_ITER=${5:-110}
 NUM_WORKERS=${6:-1}
-DATASET=${7:-nebius/SWE-rebench-leaderboard}
-#DATASET=${7:-princeton-nlp/SWE-bench_Verified}
+# 可选的数据集配置：
+#   - nebius/SWE-rebench-leaderboard (默认 - leaderboard 版本)
+#   - nebius/SWE-rebench (纯版本)
+#   - princeton-nlp/SWE-bench_Verified (SWE-Bench Verified)
+DATASET=${7:-nebius/SWE-rebench}
 SPLIT=${8:-test}
 N_RUNS=${9:-1}
 MODE=${10:-swe}
-SELECT_FIRST_N=${11:-0}  # 新增参数：选择前 N 个实例（0 表示不限制）
+SELECT_FIRST_N=${11:-0}  # 新增参数：选择前 N 个实例（0 表示不限制，支持 "50:150" 范围格式）
 
 if [ -z "$NUM_WORKERS" ]; then
   NUM_WORKERS=1
@@ -265,8 +277,6 @@ fi
 if [ -z "$DATASET" ]; then
   echo "DATASET not specified, use default nebius/SWE-rebench-leaderboard"
   DATASET="nebius/SWE-rebench-leaderboard"
-  #echo "DATASET not specified, use default princeton-nlp/SWE-bench_Verified"
-  #DATASET="princeton-nlp/SWE-bench_Verified"  echo "DATASET not specified, use default princeton-nlp/SWE-bench_Verified"
 fi
 
 if [ -z "$SPLIT" ]; then

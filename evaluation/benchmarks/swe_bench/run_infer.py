@@ -908,10 +908,14 @@ def filter_dataset(dataset: pd.DataFrame, filter_column: str) -> pd.DataFrame:
                 logger.info(
                     f'Filtering {len(selected_ids)} tasks from "selected_ids"...'
                 )
-                subset = dataset[dataset[filter_column].isin(selected_ids)]
-                logger.info(f'Retained {subset.shape[0]} tasks after filtering')
-                return subset
-            if 'selected_repos' in data:
+                dataset = dataset[dataset[filter_column].isin(selected_ids)]
+                order_lookup = {instance_id: idx for idx, instance_id in enumerate(selected_ids)}
+                dataset = dataset.sort_values(
+                    by=filter_column,
+                    key=lambda column: column.map(order_lookup),
+                )
+                logger.info(f'Retained {dataset.shape[0]} tasks after filtering')
+            elif 'selected_repos' in data:
                 # repos for the swe-bench instances:
                 # ['astropy/astropy', 'django/django', 'matplotlib/matplotlib', 'mwaskom/seaborn', 'pallets/flask', 'psf/requests', 'pydata/xarray', 'pylint-dev/pylint', 'pytest-dev/pytest', 'scikit-learn/scikit-learn', 'sphinx-doc/sphinx', 'sympy/sympy']
                 selected_repos = data['selected_repos']
@@ -921,23 +925,36 @@ def filter_dataset(dataset: pd.DataFrame, filter_column: str) -> pd.DataFrame:
                 logger.info(
                     f'Filtering {selected_repos} tasks from "selected_repos"...'
                 )
-                subset = dataset[dataset['repo'].isin(selected_repos)]
-                logger.info(f'Retained {subset.shape[0]} tasks after filtering')
-                return subset
+                dataset = dataset[dataset['repo'].isin(selected_repos)]
+                logger.info(f'Retained {dataset.shape[0]} tasks after filtering')
 
-    skip_ids = os.environ.get('SKIP_IDS', '').split(',')
+    skip_ids = [sid for sid in os.environ.get('SKIP_IDS', '').split(',') if sid]
     if len(skip_ids) > 0:
         logger.info(f'Filtering {len(skip_ids)} tasks from "SKIP_IDS"...')
         dataset = dataset[~dataset[filter_column].isin(skip_ids)]
 
-    # NEW: Support SELECT_FIRST_N environment variable to select first N instances
+    # Support SELECT_FIRST_N environment variable to select N instances or a slice start:end
     select_first_n = os.environ.get('SELECT_FIRST_N', '0')
     try:
-        select_first_n = int(select_first_n)
-        if select_first_n > 0:
-            logger.info(f'Selecting first {select_first_n} instances from dataset...')
-            dataset = dataset.head(select_first_n)
-            logger.info(f'Retained {len(dataset)} tasks after selecting first N')
+        if ':' in select_first_n:
+            start_str, end_str = [part.strip() for part in select_first_n.split(':', 1)]
+            start_idx = int(start_str) if start_str else 0
+            end_idx = int(end_str) if end_str else None
+            if end_idx is not None:
+                end_idx = min(end_idx, len(dataset))
+            logger.info(
+                f'Selecting slice of dataset from {start_idx} to {end_idx} via SELECT_FIRST_N...'
+            )
+            dataset = dataset.iloc[start_idx:end_idx]
+            logger.info(
+                f'Retained {len(dataset)} tasks after applying SELECT_FIRST_N slice'
+            )
+        else:
+            limit = int(select_first_n)
+            if limit > 0:
+                logger.info(f'Selecting first {limit} instances from dataset...')
+                dataset = dataset.head(limit)
+                logger.info(f'Retained {len(dataset)} tasks after selecting first N')
     except ValueError:
         logger.warning(f'Invalid SELECT_FIRST_N value: {select_first_n}, ignoring')
 

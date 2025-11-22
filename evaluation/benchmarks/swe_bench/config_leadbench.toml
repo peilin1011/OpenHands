@@ -1,0 +1,47 @@
+# Use selected_ids to run specific instances (this overrides EVAL_LIMIT random sampling)
+selected_ids = [
+  "PennyLaneAI__pennylane-7671",
+  "conan-io__conan-18444",
+  "deepset-ai__haystack-9527",
+  "feder-observatory__stellarphot-519",
+  "feder-observatory__stellarphot-526",
+  "lmstudio-ai__venvstacks-197",
+  "matthewwithanm__python-markdownify-230",
+  "pybamm-team__PyBaMM-5061",
+  "python-pillow__Pillow-9023",
+  "sympy__sympy-28122",
+  "tobymao__sqlglot-5189",
+  "tobymao__sqlglot-5233",
+  "tobymao__sqlglot-5253",
+  "tobymao__sqlglot-5256",
+  "trinodb__trino-python-client-564",
+  "vyperlang__vyper-4677",
+  "yt-dlp__yt-dlp-13403",
+  "zopefoundation__persistent-220",
+  "BQSKit__bqskit-337",
+  "JonathonReinhart__scuba-269",
+  "agronholm__anyio-935",
+  "biopython__biopython-5005",
+  "bodo-ai__PyDough-368",
+  "catalystneuro__neuroconv-1406",
+  "geopandas__geopandas-3591",
+  "marcosschroh__dataclasses-avroschema-870",
+  "open-telemetry__opentelemetry-python-4614",
+  "psf__black-4676",
+  "python-trio__trio-3280",
+  "python-wheel-build__fromager-626",
+  "radiasoft__pykern-578",
+  "sympy__sympy-28137",
+  "sympy__sympy-28183",
+  "gitpython-developers__GitPython-2051",
+  "pymc-devs__pymc-7809",
+  "scipp__plopp-459",
+  "isledecomp__reccmp-142",
+  "lmstudio-ai__lmstudio-python-110",
+  "meilisearch__meilisearch-mcp-39",
+  "ome-zarr-models__ome-zarr-models-py-206"
+]
+
+# To run more instances, first pull their .sif images using pull_images_on_hpc.sh
+# Example: bash evaluation/benchmarks/swe_bench/scripts/pull_images_on_hpc.sh \
+#   --dockerhub-user peillin --dataset princeton-nlp/SWE-bench_Verified --slice 0:5

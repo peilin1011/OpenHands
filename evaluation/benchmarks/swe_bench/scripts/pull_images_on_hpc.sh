@@ -3,6 +3,7 @@
 #
 # Usage:
 #   ./pull_images_on_hpc.sh --dockerhub-user yourname --dockerhub-repo openhands-swebench
+# /anvme/workspace/b273dd14-swe-openhands/OpenHands/evaluation/benchmarks/swe_bench/scripts/pull_images_on_hpc.sh --dockerhub-user peillin --dockerhub-repo openhands-swerebench --pull-all
 #
 # Options:
 #   --dockerhub-user USER      Docker Hub username (required)
@@ -17,7 +18,7 @@ set -e
 
 # Default values
 DOCKERHUB_REPO="openhands-swebench"
-SIF_DIR="$(pwd)/.apptainer_cache/images"
+SIF_DIR="$(pwd)/.apptainer_cache/images_rebench"
 CACHE_DIR="$(pwd)/.apptainer_cache"
 PARALLEL=1
 INSTANCE_IDS=""
@@ -201,9 +202,9 @@ else
     echo "Pulling images sequentially..."
     for instance_id in "${INSTANCES[@]}"; do
         if pull_image "$instance_id"; then
-            ((successful++))
+            ((successful += 1))
         else
-            ((failed++))
+            ((failed += 1))
         fi
         echo ""
     done
