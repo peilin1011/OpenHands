@@ -6,11 +6,11 @@ then pushes them to Docker Hub for later use in Apptainer environments.
 
 Usage:
     python evaluation/benchmarks/swe_bench/scripts/build_and_push_images.py \
-        --dataset princeton-nlp/SWE-bench_Verified \
-        --split test \
-        --dockerhub-user yourname \
-        --dockerhub-repo openhands-swebench \
-        --slice 100:200
+        --dataset SWE-Gym/SWE-Gym \
+        --split train \
+        --dockerhub-user peillin \
+        --dockerhub-repo openhands-swegym \
+        --slice 601:650
 """
 
 import argparse
@@ -31,6 +31,7 @@ from evaluation.benchmarks.swe_bench.run_infer import (
     set_dataset_type,
     filter_dataset,
 )
+from evaluation.benchmarks.swe_bench import run_infer
 from openhands.core.logger import openhands_logger as logger
 from openhands.runtime.builder import DockerRuntimeBuilder
 from openhands.runtime.utils.runtime_build import build_runtime_image
@@ -373,10 +374,12 @@ def main():
 
         cleanup_candidates: list[str] = []
         try:
-            # Get base SWE-bench official image
+            # Get base SWE-bench image (official or OpenHands version based on dataset type)
+            # SWE-Gym and Multimodal datasets don't have official images
+            use_official_image = run_infer.DATASET_TYPE != 'SWE-Gym'
             base_image = get_instance_docker_image(
                 instance_id=instance_id,
-                swebench_official_image=True,
+                swebench_official_image=use_official_image,
             )
             cleanup_candidates.append(base_image)
 
