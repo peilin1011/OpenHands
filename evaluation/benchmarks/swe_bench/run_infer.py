@@ -240,6 +240,19 @@ def get_config(
     instance: pd.Series,
     metadata: EvalMetadata,
 ) -> OpenHandsConfig:
+    # Add instance_id to condenser config if supported
+    if (
+        hasattr(metadata, 'condenser_config')
+        and metadata.condenser_config is not None
+        and hasattr(metadata.condenser_config, 'instance_id')
+    ):
+        # Create a copy of the condenser config with instance_id set
+        from openhands.core.config.condenser_config import LLMSummarizingCondenserConfig
+        if isinstance(metadata.condenser_config, LLMSummarizingCondenserConfig):
+            metadata.condenser_config = metadata.condenser_config.model_copy(
+                update={'instance_id': instance['instance_id']}
+            )
+
     # We use a different instance image for the each instance of swe-bench eval
     use_swebench_official_image = DATASET_TYPE != 'SWE-Gym'
     if IS_APPTAINER_RUNTIME:
@@ -682,15 +695,34 @@ def complete_runtime(
                 f'Failed to remove git directory {git_dir}: {str(obs)}',
             )
 
-    # add all files
-    action = CmdRunAction(command='git add -A')
+    # Only add Python source files to prevent over-engineering
+    # This excludes docs, configs, and other non-essential files
+    # First, add all Python files
+    action = CmdRunAction(command='git add -A "*.py"')
     action.set_hard_timeout(600)
     logger.info(action, extra={'msg_type': 'ACTION'})
     obs = runtime.run_action(action)
     logger.info(obs, extra={'msg_type': 'OBSERVATION'})
+
+    # Log a warning if this is the first time using filtered add
+    logger.info("Using filtered git add to exclude third-party and build artifacts")
+
+    # Show what was actually staged
+    stat_action = CmdRunAction(command='git diff --cached --stat')
+    stat_action.set_hard_timeout(300)
+    stat_obs = runtime.run_action(stat_action)
+    logger.info(f"Staged changes:\n{stat_obs.content}", extra={'msg_type': 'OBSERVATION'})
+
+    # Count files and warn if too many
+    num_files = len([line for line in stat_obs.content.split('\n') if '|' in line])
+    if num_files > 20:
+        logger.error(f"🚨 ALERT: {num_files} files staged! Agent may have over-engineered.")
+    elif num_files > 10:
+        logger.warning(f"⚠️  {num_files} files staged (expected <5 for most bug fixes)")
+
     assert_and_raise(
         isinstance(obs, CmdOutputObservation) and obs.exit_code == 0,
-        f'Failed to git add -A: {str(obs)}',
+        f'Failed to git add with filters: {str(obs)}',
     )
 
     # Remove binary files from git staging
