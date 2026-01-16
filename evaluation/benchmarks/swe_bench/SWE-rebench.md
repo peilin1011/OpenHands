@@ -53,8 +53,8 @@ After inference completes, evaluate using the [SWE-bench-fork evaluation harness
 1. Convert the OpenHands output to SWE-bench evaluation format:
 
 ```bash
-python evaluation/benchmarks/swe_bench/scripts/live/convert.py \
-  --output_jsonl path/to/evaluation/output.jsonl > preds.jsonl
+python OpenHands/evaluation/benchmarks/swe_bench/scripts/live/convert.py \
+  --output_jsonl /anvme/workspace/b273dd14-swe-openhands/OpenHands/evaluation/evaluation_outputs/outputs/nebius__SWE-rebench-test/CodeActAgent/Qwen3-32B_maxiter_110_N_v0.59.0-no-hint-run_1/output.jsonl > preds.jsonl
 ```
 
 2. Clone the SWE-bench-fork repo (https://github.com/SWE-rebench/SWE-bench-fork) and follow its README to install dependencies.
@@ -70,7 +70,7 @@ python -m swebench.harness.run_evaluation \
     --max_workers 10 \
     --run_id openhands
 ```
-
+python -m SWE-bench-fork.swebench.harness.run_evaluation   --dataset_name nebius/SWE-rebench   --split test   --predictions_path /anvme/workspace/b273dd14-swe-openhands/preds.jsonl  --run_id swe_rebench_raw   --namespace swerebench   --apptainer true   --apptainer_cache_dir /anvme/workspace/b273dd14-swe-openhands/.apptainer_cache/images   --max_workers 1
 
 ## Citation
 

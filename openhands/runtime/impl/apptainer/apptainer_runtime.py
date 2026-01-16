@@ -3,6 +3,7 @@ import io
 import os
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -60,6 +61,7 @@ class ApptainerRuntime(ActionExecutionClient):
         self._log_thread: threading.Thread | None = None
         self._log_file_handle: io.TextIOWrapper | None = None
         self._log_file_path: str | None = None
+        self._overlay_dir: str | None = None
         self._host_port_lock: PortLock | None = None
         self._vscode_port_lock: PortLock | None = None
         self._app_port_locks: list[PortLock | None] = []
@@ -126,7 +128,28 @@ class ApptainerRuntime(ActionExecutionClient):
         self._runtime_initialized = True
 
     def close(self) -> None:
-        super().close()
+        # Call parent close with timeout protection to prevent hanging
+        try:
+            close_timeout = 5  # seconds
+            exception_holder = []
+
+            def call_parent_close():
+                try:
+                    super(ApptainerRuntime, self).close()
+                except Exception as e:
+                    exception_holder.append(e)
+
+            parent_thread = threading.Thread(target=call_parent_close, daemon=True)
+            parent_thread.start()
+            parent_thread.join(timeout=close_timeout)
+
+            if parent_thread.is_alive():
+                self.log('warning', f'Parent close() timed out after {close_timeout} seconds, continuing with cleanup')
+            elif exception_holder:
+                self.log('warning', f'Error in parent close(): {exception_holder[0]}')
+        except Exception as e:
+            self.log('warning', f'Failed to call parent close(): {e}')
+
         if self._server_process:
             if self._server_process.poll() is None:
                 self._server_process.terminate()
@@ -151,6 +174,15 @@ class ApptainerRuntime(ActionExecutionClient):
             except Exception:
                 pass
             self._log_file_handle = None
+
+        # Clean up overlay directory
+        if self._overlay_dir and os.path.exists(self._overlay_dir):
+            try:
+                shutil.rmtree(self._overlay_dir)
+            except Exception as e:
+                self.log('warning', f'Failed to clean up overlay directory {self._overlay_dir}: {e}')
+            self._overlay_dir = None
+
         self._release_port_locks()
 
     @classmethod
@@ -257,6 +289,11 @@ class ApptainerRuntime(ActionExecutionClient):
     def _build_apptainer_command(self) -> tuple[list[str], dict[str, str]]:
         sandbox = self.config.sandbox
         command: list[str] = [self._apptainer_executable, 'exec', '--cleanenv']
+
+        # Use disk-based overlay for large patches instead of tmpfs
+        if not self._overlay_dir:
+            self._overlay_dir = tempfile.mkdtemp(prefix='apptainer_overlay_')
+        command.extend(['--overlay', self._overlay_dir])
 
         for bind in self._build_bind_args():
             command.extend(['--bind', bind])

@@ -23,18 +23,28 @@ WORKSPACE_NAME=$(echo "$item" | jq -r '(.repo | tostring) + "__" + (.version | t
 
 echo "WORKSPACE_NAME: $WORKSPACE_NAME"
 
-# Clear the workspace
-if [ -d /workspace ]; then
-    rm -rf /workspace/*
-else
-    mkdir /workspace
-fi
-# Copy repo to workspace
-if [ -d /workspace/$WORKSPACE_NAME ]; then
-    rm -rf /workspace/$WORKSPACE_NAME
-fi
+# Ensure /workspace exists (do not delete other instances' directories)
 mkdir -p /workspace
-cp -r /testbed /workspace/$WORKSPACE_NAME
+
+# Initialize workspace for this specific instance
+# Each instance has a unique directory name, so no locking is needed
+WORKSPACE_DIR="/workspace/$WORKSPACE_NAME"
+
+# Remove only this instance's workspace directory (not all contents of /workspace)
+# This ensures each instance has a clean workspace without affecting others
+if [ -d "$WORKSPACE_DIR" ]; then
+    rm -rf "$WORKSPACE_DIR"
+fi
+
+# Copy repository from /testbed to workspace for this instance
+# Each instance gets its own copy from /testbed
+cp -r /testbed "$WORKSPACE_DIR"
+
+# Verify the workspace was created successfully
+if [ ! -d "$WORKSPACE_DIR" ]; then
+    echo "Error: Failed to create workspace directory $WORKSPACE_DIR" >&2
+    exit 1
+fi
 
 # Activate instance-specific environment
 if [ -d /opt/miniconda3 ]; then

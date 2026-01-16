@@ -1,9 +1,36 @@
-#!/bin/bash
+#!/bin/bash -l
+#SBATCH --gres=gpu:a40:1   # 请求 GPU
+#SBATCH --time=10:00:00     # 运行时间限制10小时
+#SBATCH --job-name=pull_images_on_hpc
+#SBATCH --export=NONE       # 不继承提交环境
+
+# ============================================================================
+# SLURM 任务配置与环境初始化
+# ============================================================================
+unset SLURM_EXPORT_ENV      # 允许环境传递给srun，提高环境变量传递的灵活性
+module load python/3.12-conda  # 加载 Python 3.12 conda 环境模块 (可选，根据系统配置)
+
+# 设置工作目录
+WORKDIR="/anvme/workspace/b273dd14-swe-openhands/OpenHands"
+cd "$WORKDIR"
+
+# ============================================================================
+# Conda 环境配置
+# ============================================================================
+# 设置 Conda 环境和包的存储位置，避免占用 home 目录配额
+export CONDA_ENVS_PATH=/anvme/workspace/b273dd14-swe-openhands/conda_envs
+export CONDA_PKGS_DIRS=/anvme/workspace/b273dd14-swe-openhands/conda_pkgs
+conda activate openhands  # 激活 OpenHands 环境 (假设已在当前 shell 中激活)
+
+# 设置错误退出模式：任何命令失败都会终止脚本执行
+set -eo pipefail
+
+
 # Pull Docker images from Docker Hub and convert to Apptainer .sif format on HPC
 #
 # Usage:
-#   ./pull_images_on_hpc.sh --dockerhub-user yourname --dockerhub-repo openhands-swebench
-# /anvme/workspace/b273dd14-swe-openhands/OpenHands/evaluation/benchmarks/swe_bench/scripts/pull_images_on_hpc.sh --dockerhub-user peillin --dockerhub-repo openhands-swerebench --pull-all
+#  /anvme/workspace/b273dd14-swe-openhands/OpenHands/evaluation/benchmarks/swe_bench/scripts/pull_images_on_hpc.sh --dockerhub-user peillin --dockerhub-repo openhands-swegym --pull-all
+# /anvme/workspace/b273dd14-swe-openhands/OpenHands/evaluation/benchmarks/swe_bench/scripts/pull_images_on_hpc.sh --dockerhub-user peillin --dockerhub-repo openhands-swegym --pull-all
 #
 # Options:
 #   --dockerhub-user USER      Docker Hub username (required)
@@ -18,9 +45,9 @@ set -e
 
 # Default values
 DOCKERHUB_REPO="openhands-swebench"
-SIF_DIR="$(pwd)/.apptainer_cache/images_rebench"
-CACHE_DIR="$(pwd)/.apptainer_cache"
-PARALLEL=1
+SIF_DIR="/anvme/workspace/b273dd14-swe-openhands/.apptainer_cache/images"
+CACHE_DIR="/anvme/workspace/b273dd14-swe-openhands/.apptainer_cache"
+PARALLEL=2
 INSTANCE_IDS=""
 DOCKERHUB_USER=""
 PULL_ALL=false

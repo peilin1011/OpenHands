@@ -3,6 +3,7 @@ import json
 import os
 import subprocess
 import tempfile
+import threading
 import time
 from dataclasses import dataclass
 from functools import partial
@@ -35,9 +36,46 @@ from openhands.events.action import CmdRunAction
 from openhands.events.observation import CmdOutputObservation
 from openhands.utils.async_utils import call_async_from_sync
 
+#export RUNTIME=apptainer
+#export APPTAINER_CACHEDIR=/anvme/workspace/b273dd14-swe-openhands/.apptainer_cache
+# python /anvme/workspace/b273dd14-swe-openhands/OpenHands/evaluation/benchmarks/swe_bench/eval_infer.py --input-file /anvme/workspace/b273dd14-swe-openhands/OpenHands/evaluation/evaluation_outputs/outputs/SWE-Gym__SWE-Gym-train/CodeActAgent/Qwen3-32B_maxiter_110_N_v0.59.0-no-hint-run_1/output.jsonl--dataset SWE-Gym/SWE-Gym --eval-num-workers 1 --split train
+# python /anvme/workspace/b273dd14-swe-openhands/OpenHands/evaluation/benchmarks/swe_bench/eval_infer.py --input-file /anvme/workspace/b273dd14-swe-openhands/OpenHands/evaluation/evaluation_outputs/outputs/princeton-nlp__SWE-bench_Verified-test/Qwen3-32B_maxiter_110_N_raw_agent_0-50_T=0_F=4/output.jsonl --dataset princeton-nlp/SWE-bench_Verified --eval-num-workers 1 --split test
+
 # TODO: migrate all swe-bench docker to ghcr.io/openhands
+RUNTIME_NAME = os.environ.get('RUNTIME', 'apptainer')
+IS_APPTAINER_RUNTIME = RUNTIME_NAME == 'apptainer'
+
+# Configure image prefix based on runtime type
 DOCKER_IMAGE_PREFIX = os.environ.get('EVAL_DOCKER_IMAGE_PREFIX', 'docker.io/xingyaoww/')
-logger.info(f'Using docker image prefix: {DOCKER_IMAGE_PREFIX}')
+
+# Auto-detect and set APPTAINER_CACHEDIR if not already set
+if IS_APPTAINER_RUNTIME:
+    cachedir = os.environ.get('APPTAINER_CACHEDIR')
+    if not cachedir:
+        # Try to auto-detect common Apptainer cache locations
+        workspace_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+        possible_cache_dirs = [
+            os.path.join(workspace_root, '.apptainer_cache'),
+            os.path.expanduser('~/.apptainer'),
+            os.path.expanduser('~/.singularity'),
+        ]
+        for cache_path in possible_cache_dirs:
+            if os.path.isdir(cache_path):
+                cachedir = cache_path
+                os.environ['APPTAINER_CACHEDIR'] = cachedir
+                logger.info(f'Auto-detected APPTAINER_CACHEDIR: {cachedir}')
+                break
+
+# For Apptainer runtime, check if APPTAINER_CACHEDIR is set and use it as image prefix
+if IS_APPTAINER_RUNTIME and DOCKER_IMAGE_PREFIX == 'docker.io/xingyaoww/':
+    cachedir = os.environ.get('APPTAINER_CACHEDIR')
+    if cachedir:
+        candidate = os.path.join(os.path.abspath(cachedir), 'images')
+        if os.path.isdir(candidate):
+            DOCKER_IMAGE_PREFIX = candidate
+            logger.info(f'Apptainer cache detected, using local images from: {DOCKER_IMAGE_PREFIX}')
+
+logger.info(f'Using image prefix ({RUNTIME_NAME}): {DOCKER_IMAGE_PREFIX}')
 
 
 def process_git_patch(patch):
@@ -72,7 +110,20 @@ def process_git_patch(patch):
 
 def get_config(metadata: EvalMetadata, instance: pd.Series) -> OpenHandsConfig:
     # We use a different instance image for the each instance of swe-bench eval
-    base_container_image = get_instance_docker_image(instance['instance_id'])
+    instance_id = instance['instance_id']
+
+    # Build image path based on runtime type
+    if IS_APPTAINER_RUNTIME:
+        # For Apptainer, construct the image path with .sif extension
+        image_name = 'sweb.eval.x86_64.' + instance_id
+        image_name = image_name.replace('__', '_s_')  # comply with naming conventions
+        base_container_image = os.path.join(DOCKER_IMAGE_PREFIX, image_name)
+        if not base_container_image.endswith('.sif'):
+            base_container_image = f'{base_container_image}.sif'
+    else:
+        # For Docker, use the original function
+        base_container_image = get_instance_docker_image(instance_id)
+
     logger.info(
         f'Using instance container image: {base_container_image}. '
         f'Please make sure this image exists. '
@@ -82,10 +133,10 @@ def get_config(metadata: EvalMetadata, instance: pd.Series) -> OpenHandsConfig:
     sandbox_config.base_container_image = base_container_image
     sandbox_config.remote_runtime_resource_factor = get_instance_resource_factor(
         dataset_name=metadata.dataset,
-        instance_id=instance['instance_id'],
+        instance_id=instance_id,
     )
     config = get_openhands_config_for_eval(
-        runtime=os.environ.get('RUNTIME', 'docker'),
+        runtime=RUNTIME_NAME,
         sandbox_config=sandbox_config,
     )
     return config
@@ -317,9 +368,11 @@ def process_instance(
                             logger.info(
                                 f'[{instance_id}] report: {report}\nResult for {instance_id}: resolved: {report["resolved"]}'
                             )
+                            logger.info(f'###########0')
                             instance['test_result']['report']['resolved'] = report[
                                 'resolved'
                             ]
+                            logger.info(f'###########A')
                         except Exception as e:
                             logger.error(
                                 f'[{instance_id}] Error when getting eval report: {e}'
@@ -329,7 +382,7 @@ def process_instance(
             else:
                 logger.info(f'[{instance_id}] Error when starting eval:\n{obs.content}')
                 instance['test_result']['report']['error_eval'] = True
-
+            logger.info(f'###########1')
             return EvalOutput(
                 instance_id=instance_id,
                 test_result=instance['test_result'],
@@ -345,7 +398,14 @@ def process_instance(
                 logger,
             )
     finally:
-        runtime.close()
+        logger.info(f'########Finished evaluation for instance {instance_id}.')
+        # Add timeout protection for runtime.close() to prevent hanging
+        close_thread = threading.Thread(target=runtime.close, daemon=True)
+        close_thread.start()
+        close_thread.join(timeout=15)  # Wait max 15 seconds
+        if close_thread.is_alive():
+            logger.warning(f'[{instance_id}] runtime.close() timed out after 15 seconds, continuing')
+        logger.info(f'############Finished evaluation for instance {instance_id}.')
 
 
 if __name__ == '__main__':
@@ -383,7 +443,7 @@ if __name__ == '__main__':
         from swegym.harness.utils import load_swebench_dataset
     else:  # Newer version of SWE-Bench have different import paths
         from swebench.harness.grading import get_eval_report
-        from swebench.harness.run_evaluation import (
+        from swebench.harness.constants import (
             APPLY_PATCH_FAIL,
             APPLY_PATCH_PASS,
         )
@@ -425,9 +485,9 @@ if __name__ == '__main__':
         raise ValueError(
             'Input file must contain model_patch column OR test_result column with model_patch field.'
         )
-    assert len(predictions['instance_id'].unique()) == len(predictions), (
-        'instance_id column must be unique.'
-    )
+    #assert len(predictions['instance_id'].unique()) == len(predictions), (
+    #    'instance_id column must be unique.'
+    #)
 
     if 'model_patch' not in predictions.columns:
         predictions['model_patch'] = predictions['test_result'].apply(
@@ -487,7 +547,6 @@ if __name__ == '__main__':
             APPLY_PATCH_PASS=APPLY_PATCH_PASS,
         ),
     )
-
     run_evaluation(
         instances,
         metadata=metadata,

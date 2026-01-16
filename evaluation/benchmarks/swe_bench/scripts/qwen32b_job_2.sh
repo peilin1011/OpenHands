@@ -1,13 +1,12 @@
 #!/bin/bash -l
-#SBATCH --gres=gpu:a40:8   # 请求 GPU
+#SBATCH --gres=gpu:a40:4   # 请求 GPU
 #SBATCH --time=10:00:00     # 运行时间限制6小时
-#SBATCH --job-name=0-50-without-conndenser-1part
+#SBATCH --job-name=0-50-without-conndenser-2
 #SBATCH --export=NONE       # 不继承提交环境
 
 # ============================================================================
 # SLURM 任务配置与环境初始化
 # ============================================================================
-#
 unset SLURM_EXPORT_ENV      # 允许环境传递给srun，提高环境变量传递的灵活性
 module load python/3.12-conda  # 加载 Python 3.12 conda 环境模块 (可选，根据系统配置)
 
@@ -44,12 +43,11 @@ source "/anvme/workspace/b273dd14-swe-openhands/OpenHands/evaluation/utils/versi
 #DEFAULT_SWE_DATASET_LOCAL_PATH="/anvme/workspace/b273dd14-swe-openhands/OpenHands/datasets_cache/nebius__SWE-rebench-leaderboard_2025_06_poetry"
 #DEFAULT_SWE_DATASET_LOCAL_PATH="/anvme/workspace/b273dd14-swe-openhands/OpenHands/datasets_cache/nebius__SWE-rebench-formatted"
 #DEFAULT_SWE_DATASET_LOCAL_PATH="/anvme/workspace/b273dd14-swe-openhands/OpenHands/datasets_cache/swe-gym"
-DEFAULT_SWE_DATASET_LOCAL_PATH="/anvme/workspace/b273dd14-swe-openhands/OpenHands/datasets_cache/princeton-nlp__SWE-bench_Verified"
-export SWE_DATASET_LOCAL_PATH="${SWE_DATASET_LOCAL_PATH:-$DEFAULT_SWE_DATASET_LOCAL_PATH}"
+
 # 替代数据集路径示例（已注释）
 #export SWE_DATASET_LOCAL_PATH=/anvme/workspace/b273dd14-swe-openhands/OpenHands/datasets_cache/nebius__SWE-rebench
-# export SWE_DATASET_LOCAL_PATH=/anvme/workspace/b273dd14-swe-openhands/OpenHands/datasets_cache/princeton-nlp__SWE-bench_Verified
-
+export SWE_DATASET_LOCAL_PATH=/anvme/workspace/b273dd14-swe-openhands/OpenHands/datasets_cache/princeton-nlp__SWE-bench_Verified
+export SWE_DATASET_LOCAL_PATH="${SWE_DATASET_LOCAL_PATH:-$DEFAULT_SWE_DATASET_LOCAL_PATH}"
 # 启用 HuggingFace 离线模式（避免网络请求），除非显式通过环境变量覆盖
 export HF_DATASETS_OFFLINE=1
 
@@ -59,9 +57,8 @@ export HF_DATASETS_OFFLINE=1
 export EVAL_SKIP_MAXIMUM_RETRIES_EXCEEDED=true  # 跳过达到重试上限的实例，提高效率
 # 已注释的选项：可使用 subtask_aware 条件化器（需配置文件支持）
 # export EVAL_CONDENSER=subtask_aware
-#unset EVAL_CONDENSER
 export EVAL_CONDENSER=summarizer_for_eval  # 使用摘要化的评估条件化器
-
+#unset EVAL_CONDENSER
 # ============================================================================
 # 容器（Apptainer）配置
 # ============================================================================
@@ -88,13 +85,8 @@ mkdir -p "$APPTAINER_CACHEDIR" "$APPTAINER_TMPDIR"
 # ============================================================================
 # 模型与日志路径设置
 # ============================================================================
-# 主模型：用于主要推理任务
-main_model="/anvme/workspace/b273dd14-swe-openhands/huggingface_cache/Qwen3-32B"
-# Condenser 模型：用于历史压缩/摘要（使用在 OpenHands 数据上训练的 condenser 模型）
-# 注意：使用合并后的标准 HuggingFace 格式，LoRA 权重已合并
-#condenser_model="/anvme/workspace/b273dd14-swe-openhands/checkpoints/global_step_210/merged"
-condenser_model="/anvme/workspace/b273dd14-swe-openhands/huggingface_cache/Qwen3-32B"
-
+# 本地 Qwen3 32B 模型路径（避免每次都从 HuggingFace 下载）
+model="/anvme/workspace/b273dd14-swe-openhands/huggingface_cache/Qwen3-32B"
 log_dir='logs'  # 日志目录
 TIMESTAMP=$(date +%Y%m%d-%H%M%S)  # 时间戳，用于生成唯一的日志文件名
 
@@ -103,56 +95,37 @@ DEFAULT_MODEL_CONFIG="llm.eval_qwen3_32b"
 #DEFAULT_MODEL_CONFIG="llm.eval_gpt5"
 run_id="${1:-$DEFAULT_MODEL_CONFIG}"  # 从命令行参数获取，或使用默认值
 # 日志文件路径：包含时间戳和运行标识，便于区分不同的运行
-vllm_main_log="$log_dir/vllm_main_${TIMESTAMP}_${run_id}.log"  # 主 vLLM 服务器日志
-vllm_condenser_log="$log_dir/vllm_condenser_${TIMESTAMP}_${run_id}.log"  # Condenser vLLM 服务器日志
+vllm_log="$log_dir/vllm_${TIMESTAMP}_${run_id}.log"  # vLLM 服务器日志
 swe_log_file="$log_dir/swe_${TIMESTAMP}_${run_id}.log"  # SWE 评估日志
 
 mkdir -p $log_dir  # 创建日志目录
 
 
 # ============================================================================
-# vLLM 服务器端口配置 (双服务器模式)
+# vLLM 服务器端口配置
 # ============================================================================
-# 为主模型和 Condenser 模型分配不同的端口
-
-# 主模型端口配置
-if [ -n "$VLLM_MAIN_PORT" ]; then
-    main_port=$VLLM_MAIN_PORT
-    echo "Using main port from environment variable: $main_port"
+# 支持通过环境变量 VLLM_PORT 指定端口，否则自动分配
+if [ -n "$VLLM_PORT" ]; then
+    port=$VLLM_PORT
+    echo "Using port from environment variable: $port"
 else
     # 基于 SLURM_JOB_ID 生成唯一端口（范围：8000-9000）
+    # 确保多个并发任务不会争用同一端口
     if [ -n "$SLURM_JOB_ID" ]; then
-        main_port=$((8000 + ($SLURM_JOB_ID % 1000)))
-        echo "Generated main port from SLURM_JOB_ID: $main_port"
+        port=$((8000 + ($SLURM_JOB_ID % 1000)))
+        echo "Generated port from SLURM_JOB_ID: $port"
     else
         # 本地测试时使用默认端口
-        main_port=8003
-        echo "Using default main port: $main_port"
+        port=8003
+        echo "Using default port: $port"
     fi
 
-    # 检查端口是否可用
-    while ss -lntu | awk 'NR>1 {print $5}' | sed 's/.*://' | grep -qw "$main_port"; do
-        echo "Main port $main_port is in use, trying next port..."
-        main_port=$((main_port + 1))
-        if [ $main_port -gt 9000 ]; then
-            echo "Error: No available ports in range 8000-9000" >&2
-            exit 1
-        fi
-    done
-fi
-
-# Condenser 模型端口配置（在主端口基础上 +1）
-if [ -n "$VLLM_CONDENSER_PORT" ]; then
-    condenser_port=$VLLM_CONDENSER_PORT
-    echo "Using condenser port from environment variable: $condenser_port"
-else
-    condenser_port=$((main_port + 1))
-
-    # 检查端口是否可用
-    while ss -lntu | awk 'NR>1 {print $5}' | sed 's/.*://' | grep -qw "$condenser_port"; do
-        echo "Condenser port $condenser_port is in use, trying next port..."
-        condenser_port=$((condenser_port + 1))
-        if [ $condenser_port -gt 9000 ]; then
+    # 检查端口是否可用，如果不可用则递增查找
+    # 使用 ss 命令查询系统中已占用的端口
+    while ss -lntu | awk 'NR>1 {print $5}' | sed 's/.*://' | grep -qw "$port"; do
+        echo "Port $port is in use, trying next port..."
+        port=$((port + 1))
+        if [ $port -gt 9000 ]; then
             echo "Error: No available ports in range 8000-9000" >&2
             exit 1
         fi
@@ -160,33 +133,23 @@ else
 fi
 
 echo "Port configuration:"
-echo "  Main model ($main_model): $main_port"
-echo "  Condenser model ($condenser_model): $condenser_port"
+echo "  Unified model $model : $port"
 
 
 
 # ============================================================================
 # 清理函数与信号处理
 # ============================================================================
-# 定义清理函数：在脚本退出或被中断时优雅地关闭两个 vLLM 服务器
+# 定义清理函数：在脚本退出或被中断时优雅地关闭 vLLM 服务器
 cleanup() {
-    echo "Script interrupted or exiting. Cleaning up vLLM servers..." >&2
-
-    # 检查主 vLLM 进程是否仍在运行
-    if [ -n "$vllm_main_pid" ] && ps -p "$vllm_main_pid" > /dev/null; then
-        echo "Stopping Main vLLM server (PID: $vllm_main_pid)..." >&2
-        kill "$vllm_main_pid"  # 发送 SIGTERM 信号
-        wait "$vllm_main_pid" 2>/dev/null  # 等待进程完全退出
+    echo "Script interrupted or exiting. Cleaning up vLLM server..." >&2
+    # 检查 vLLM 进程是否仍在运行
+    if [ -n "$vllm_pid" ] && ps -p "$vllm_pid" > /dev/null; then
+        echo "Stopping vLLM server (PID: $vllm_pid)..." >&2
+        kill "$vllm_pid"  # 发送 SIGTERM 信号
+        wait "$vllm_pid" 2>/dev/null  # 等待进程完全退出
     fi
-
-    # 检查 Condenser vLLM 进程是否仍在运行
-    if [ -n "$vllm_condenser_pid" ] && ps -p "$vllm_condenser_pid" > /dev/null; then
-        echo "Stopping Condenser vLLM server (PID: $vllm_condenser_pid)..." >&2
-        kill "$vllm_condenser_pid"  # 发送 SIGTERM 信号
-        wait "$vllm_condenser_pid" 2>/dev/null  # 等待进程完全退出
-    fi
-
-    echo "All vLLM servers stopped." >&2
+    echo "vLLM server stopped." >&2
 }
 
 # 为多个信号设置清理函数处理程序
@@ -194,27 +157,19 @@ cleanup() {
 trap cleanup SIGINT SIGTERM EXIT
 
 # ============================================================================
-# 启动两个独立的 vLLM 服务器
+# 启动统一的 vLLM 服务器
 # ============================================================================
+# 说明：使用单一 vLLM 服务器同时处理主任务和摘要任务
+# 设置最大模型长度为 128k tokens 减去 8k buffer（避免内存溢出）
 echo ""
-echo "=========================================="
-echo "🚀 Starting Dual vLLM Servers"
-echo "=========================================="
+echo "🚀 Starting Unified vLLM Server: $model"
 
-# ============================================================================
-# 1. 启动主模型 vLLM 服务器（使用 GPU 0,1,2,3）
-# ============================================================================
-echo ""
-echo "🔵 Starting Main vLLM Server: $main_model"
-echo "   - GPU: 0,1,2,3 (Tensor Parallel Size: 4)"
-echo "   - Port: $main_port"
-echo "   - Log: $vllm_main_log"
-
-CUDA_VISIBLE_DEVICES=0,1,2,3 vllm serve $main_model \
+# vLLM 服务器启动命令及配置参数
+vllm serve $model \
     --tensor-parallel-size 4 \
     --reasoning-parser qwen3 \
     --enforce-eager \
-    --gpu-memory-utilization 0.85 \
+    --gpu-memory-utilization 0.90 \
     --enable-auto-tool-choice \
     --tool-call-parser hermes \
     --rope-scaling '{"factor": 4.0, "original_max_position_embeddings": 32768, "rope_type": "yarn"}' \
@@ -222,90 +177,40 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 vllm serve $main_model \
     --max-num-seqs 40 \
     --max-model-len $((128 * 1024 - 8 * 1024)) \
     --seed 41 \
-    --port $main_port > $vllm_main_log 2>&1 &
+    --port $port > $vllm_log 2>&1 &
+    
+vllm_pid=$!  # ✅ 使用统一的变量名
 
-vllm_main_pid=$!
-echo "✅ Main vLLM server started (PID: $vllm_main_pid)"
-
-# ============================================================================
-# 2. 启动 Condenser 模型 vLLM 服务器（使用 GPU 4,5,6,7）
-# ============================================================================
-echo ""
-echo "🟢 Starting Condenser vLLM Server: $condenser_model"
-echo "   - GPU: 4,5,6,7 (Tensor Parallel Size: 4)"
-echo "   - Port: $condenser_port"
-echo "   - Log: $vllm_condenser_log"
-
-# Condenser 使用独立的 4 个 GPU，与主模型完全隔离
-CUDA_VISIBLE_DEVICES=4,5,6,7 vllm serve $condenser_model \
-    --tensor-parallel-size 4 \
-    --reasoning-parser qwen3 \
-    --enforce-eager \
-    --gpu-memory-utilization 0.85 \
-    --enable-auto-tool-choice \
-    --tool-call-parser hermes \
-    --rope-scaling '{"factor": 4.0, "original_max_position_embeddings": 32768, "rope_type": "yarn"}' \
-    --enable-prefix-caching \
-    --max-num-seqs 10 \
-    --max-model-len $((128 * 1024 - 8 * 1024)) \
-    --seed 42 \
-    --port $condenser_port > $vllm_condenser_log 2>&1 &
-
-vllm_condenser_pid=$!
-echo "✅ Condenser vLLM server started (PID: $vllm_condenser_pid)"
+echo "vLLM server starting (PID: $vllm_pid, Port: $port)"
 
 # ============================================================================
-# 等待两个 vLLM 服务器初始化完成
+# 等待 vLLM 服务器初始化完成
 # ============================================================================
 timeout_minutes=9  # 初始化超时时间：9 分钟
 start_time=$(date +%s)  # 记录启动时间
 timeout_seconds=$((timeout_minutes * 60))  # 转换为秒
 
-echo ""
-echo "⏳ Waiting for vLLM servers to initialize (timeout: ${timeout_minutes} minutes)..."
+echo "Waiting for vLLM to initialize (timeout: ${timeout_minutes} minutes)..."
 
-main_ready=false
-condenser_ready=false
-
-# 定期检查两个 vLLM 服务器状态，直到都初始化完成或超时
+# 定期检查 vLLM 服务器状态，直到初始化完成或超时
 while [ $(($(date +%s) - start_time)) -lt $timeout_seconds ]; do
-    # 检查主 vLLM 进程是否仍在运行
-    if ! ps -p $vllm_main_pid > /dev/null; then
-        echo "❌ Main vLLM server process exited with an error"
+    # 检查 vLLM 进程是否仍在运行
+    if ! ps -p $vllm_pid > /dev/null; then
+        echo "❌ vLLM server process exited with an error"
         exit 1
     fi
 
-    # 检查 Condenser vLLM 进程是否仍在运行
-    if ! ps -p $vllm_condenser_pid > /dev/null; then
-        echo "❌ Condenser vLLM server process exited with an error"
-        exit 1
-    fi
-
-    # 检查主模型日志中是否出现启动完成的标记
-    if [ "$main_ready" = false ] && [ -f "$vllm_main_log" ] && grep -q "Application startup complete." "$vllm_main_log"; then
-        echo "✅ Main vLLM server initialized successfully"
-        main_ready=true
-    fi
-
-    # 检查 Condenser 模型日志中是否出现启动完成的标记
-    if [ "$condenser_ready" = false ] && [ -f "$vllm_condenser_log" ] && grep -q "Application startup complete." "$vllm_condenser_log"; then
-        echo "✅ Condenser vLLM server initialized successfully"
-        condenser_ready=true
-    fi
-
-    # 两个服务器都初始化完成，退出循环
-    if [ "$main_ready" = true ] && [ "$condenser_ready" = true ]; then
+    # 检查日志中是否出现启动完成的标记
+    if [ -f "$vllm_log" ] && grep -q "Application startup complete." "$vllm_log"; then
+        echo "✅ vLLM initialized successfully"
         break
     fi
-
     sleep 2  # 每 2 秒检查一次
 done
 
 # 判断是否超时
 if [ $(($(date +%s) - start_time)) -ge $timeout_seconds ]; then
-    echo "❌ vLLM servers initialization timed out"
-    echo "   Main server ready: $main_ready"
-    echo "   Condenser server ready: $condenser_ready"
+    echo "❌ vLLM initialization timed out"
     exit 1
 fi
 
@@ -313,34 +218,21 @@ fi
 cat <<EOF
 
 ======================================================================
-🎯 Dual vLLM Servers are Ready!
+🎯 vLLM Server is Ready!
 ======================================================================
-
-🔵 Main Model Server:
-   • Model: $main_model
-   • PID: $vllm_main_pid
-   • Port: $main_port
-   • API Base: http://localhost:$main_port/v1
-   • GPU: 0,1,2,3 (Tensor Parallel: 4)
-   • Log: $vllm_main_log
+   Model: $model (Unified server for main + summary tasks)
+   • PID: $vllm_pid
+   • Port: $port
+   • API Base: http://localhost:$port/v1
+   • Log: $vllm_log
    • Max concurrent sequences: 40
-
-🟢 Condenser Model Server:
-   • Model: $condenser_model
-   • PID: $vllm_condenser_pid
-   • Port: $condenser_port
-   • API Base: http://localhost:$condenser_port/v1
-   • GPU: 4,5,6,7 (Tensor Parallel: 4)
-   • Log: $vllm_condenser_log
-   • Max concurrent sequences: 10
-
 ======================================================================
 
-💡 Starting SWE-bench evaluation with dual server setup...
-🛑 Press Ctrl+C to stop both servers
+💡 Starting mini-SWE-agent with workflow condenser...
+🛑 Press Ctrl+C to stop the server
 
 ======================================================================
-🚀 SWE-bench: Qwen3-32B (Dual Server Mode)
+🚀 mini-SWE-agent: Qwen3-32B (Single Server)
 ======================================================================
 
 EOF
@@ -355,8 +247,10 @@ NUM_WORKERS=${6:-2}
 # 可选的数据集配置：
 #   - nebius/SWE-rebench-leaderboard (默认 - leaderboard 版本)
 #   - nebius/SWE-rebench (纯版本)
-#   - princeton-nlp/SWE-bench_Verified (SWE-Bench Verified - 当前使用)
+#   - princeton-nlp/SWE-bench_Verified (SWE-Bench Verified)
+#DATASET=${7:-SWE-Gym/SWE-Gym}
 DATASET=${7:-princeton-nlp/SWE-bench_Verified}
+#SPLIT=${8:-train}
 SPLIT=${8:-test}
 N_RUNS=${9:-1}
 MODE=${10:-swe}
@@ -473,37 +367,24 @@ fi
 function run_eval() {
   local eval_note="${1}"
 
-  # Create a temporary config file with dynamic ports for dual servers
-  TEMP_CONFIG="/tmp/openhands_config_${SLURM_JOB_ID:-$$}_main${main_port}_condenser${condenser_port}.toml"
-  echo "Creating temporary config with dynamic ports: $TEMP_CONFIG"
+  # Create a temporary config file with dynamic port
+  TEMP_CONFIG="/tmp/openhands_config_${SLURM_JOB_ID:-$$}_${port}.toml"
+  echo "Creating temporary config with dynamic port: $TEMP_CONFIG"
 
-  # Use awk to replace base_url ports for both main and condenser models
-  # This script identifies the section and updates the appropriate port
-  awk -v main_port="$main_port" -v condenser_port="$condenser_port" '
-    # Track which section we are in
-    /^\[llm\.eval_qwen3_32b\]/ { in_main=1; in_condenser=0 }
-    /^\[llm\.condenser_llm\]/ { in_condenser=1; in_main=0 }
-    /^\[/ && !/^\[llm\.eval_qwen3_32b\]/ && !/^\[llm\.condenser_llm\]/ { in_main=0; in_condenser=0 }
-
-    # Replace base_url in the appropriate section
+  # Use awk to replace all base_url ports (works on both Linux and macOS)
+  awk -v new_port="$port" '
     /^base_url = "http:\/\/localhost:[0-9]+\/v1"/ {
-      if (in_main) {
-        print "base_url = \"http://localhost:" main_port "/v1\""
-        next
-      }
-      if (in_condenser) {
-        print "base_url = \"http://localhost:" condenser_port "/v1\""
-        next
-      }
+      print "base_url = \"http://localhost:" new_port "/v1\""
+      next
     }
     { print }
   ' config.toml > "$TEMP_CONFIG"
 
-  echo "Updated config file with dual ports:"
-  echo "  [llm.eval_qwen3_32b] base_url -> http://localhost:$main_port/v1 (Main Model)"
-  echo "  [llm.condenser_llm] base_url -> http://localhost:$condenser_port/v1 (Condenser Model)"
+  echo "Updated config file with port $port:"
+  echo "  [llm.eval_qwen3_32b] base_url -> http://localhost:$port/v1"
+  echo "  [llm.condenser_llm] base_url -> http://localhost:$port/v1"
 
-  COMMAND="poetry run python evaluation/benchmarks/swe_bench/run_infer.py \
+  COMMAND="poetry run python evaluation/benchmarks/swe_bench/run_infer_2.py \
     --config-file $TEMP_CONFIG \
     --agent-cls $AGENT \
     --llm-config $MODEL_CONFIG \

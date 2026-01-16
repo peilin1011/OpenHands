@@ -380,8 +380,19 @@ class LLM(RetryMixin, DebugMixin):
                     f'{self.config.model.replace("/", "__")}-{time.time()}.json',
                 )
 
+                # Extract instance_id from the log_completions_folder path
+                # Expected path structure: .../llm_completions/{instance_id}/
+                instance_id = None
+                try:
+                    instance_id = os.path.basename(
+                        self.config.log_completions_folder.rstrip('/')
+                    )
+                except Exception:
+                    pass
+
                 # set up the dict to be logged
                 _d = {
+                    'instance_id': instance_id,
                     'messages': messages,
                     'response': resp,
                     'args': args,

@@ -263,3 +263,5 @@ test-results
 datasets_cache
 huggingface_cache
 swe_util
+
+.apptainer_cache

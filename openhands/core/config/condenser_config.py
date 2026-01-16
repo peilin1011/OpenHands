@@ -81,6 +81,10 @@ class LLMSummarizingCondenserConfig(BaseModel):
         default=10_000,
         description='Maximum length of the event representations to be passed to the LLM.',
     )
+    instance_id: str | None = Field(
+        default=None,
+        description='Optional instance ID to include in condensed summaries for tracking.',
+    )
 
     model_config = ConfigDict(extra='forbid')
 

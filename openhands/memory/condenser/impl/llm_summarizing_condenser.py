@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 from openhands.core.config.condenser_config import LLMSummarizingCondenserConfig
 from openhands.core.message import Message, TextContent
 from openhands.events.action.agent import CondensationAction
@@ -28,6 +30,7 @@ class LLMSummarizingCondenser(RollingCondenser):
         max_size: int = 100,
         keep_first: int = 1,
         max_event_length: int = 10_000,
+        instance_id: str | None = None,
     ):
         if keep_first >= max_size // 2:
             raise ValueError(
@@ -42,6 +45,16 @@ class LLMSummarizingCondenser(RollingCondenser):
         self.keep_first = keep_first
         self.max_event_length = max_event_length
         self.llm = llm
+        self.instance_id = instance_id
+
+        # Configure LLM log path to include instance_id if provided
+        if instance_id and hasattr(llm.config, 'log_completions_folder'):
+            # Update log_completions_folder to include instance_id as a subdirectory
+            base_folder = llm.config.log_completions_folder
+            instance_log_folder = os.path.join(base_folder, instance_id)
+            llm.config.log_completions_folder = instance_log_folder
+            # Ensure the directory exists
+            os.makedirs(instance_log_folder, exist_ok=True)
 
         super().__init__()
 
@@ -176,6 +189,7 @@ CURRENT_STATE: Last flip: Heads, Haiku count: 15/20"""
             max_size=config.max_size,
             keep_first=config.keep_first,
             max_event_length=config.max_event_length,
+            instance_id=config.instance_id,
         )
 
 
